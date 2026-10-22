@@ -21,7 +21,6 @@ Compatible with Python 3.6+ and pyarrow 6.0.1+.
 import argparse
 import datetime
 import decimal
-import glob
 import hashlib
 import json
 import os
@@ -88,7 +87,6 @@ def make_types(path, n=20000, rg_rows=2500):
         out[1] = -out[0]
         return out
 
-    base = datetime.datetime(1970, 1, 1)
     days = rng.randint(-719162, 2932896, n)               # 0001-01-01 .. 9999-12-31
     days[:2] = [-719162, 2932896]
     gap = (days >= GAP_FIRST) & (days <= GAP_LAST)          # 1582-10-05..14 don't exist in Oracle
@@ -361,7 +359,7 @@ def table_sources(part_file):
     part = pqora.read_part(part_file)
     d = os.path.dirname(os.path.abspath(part_file))
     srcs = []
-    for f in sorted(glob.glob(os.path.join(d, part["table"].lower() + "_*.pqpart")), key=pqora.natural_key):
+    for f in pqora.table_part_files(d, part["table"]):
         p = pqora.read_part(f)
         if p["table"] == part["table"]:
             srcs.extend(p["sources"])
@@ -401,7 +399,7 @@ def part_rows(part_file):
     part, _ = table_sources(part_file)
     d = os.path.dirname(os.path.abspath(part_file))
     total = 0
-    for f in glob.glob(os.path.join(d, part["table"].lower() + "_*.pqpart")):
+    for f in pqora.table_part_files(d, part["table"]):
         total += pqora.read_part(f)["rows"]
     return total
 

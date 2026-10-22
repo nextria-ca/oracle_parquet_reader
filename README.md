@@ -26,17 +26,39 @@ Appliance with Oracle Linux 7).
 pqora.py /data/sales/*.parquet
 
 # 2. generate: one .pqpart per row group (or --target-size to group them),
-#    the DDL (external table + target table + parallel INSERT) and pqora.sh
-pqora.py generate /data/sales/ --table SALES \
-    --out-dir /u01/pqora/parts  --exec-dir /u01/pqora/exec  --log-dir /u01/pqora/log \
-    --sample-size all --dop 16
+#    the DDL (external table + target table + parallel INSERT) and pqora.sh.
+#    One run = one table; loop over files/directories for several tables.
+pqora.py generate /data/sales/ --table SALES --out-dir /u01/pqora --sample-size all --dop 16
 
-# 3. as DBA: directory objects PQORA_EXEC (READ, EXECUTE), PQORA_PARTS (READ),
-#    PQORA_LOG (READ, WRITE) on those three paths; then run sales.sql
+# 3. as DBA, one directory object for everything (default name PQORA_PARTS):
+#      CREATE DIRECTORY PQORA_PARTS AS '/u01/pqora';
+#      GRANT READ, WRITE, EXECUTE ON DIRECTORY PQORA_PARTS TO <schema>;
+#    then run /u01/pqora/sales.sql
+#    (separate objects: --exec-dir-object/--exec-dir, --log-dir-object/--log-dir)
 
 # optional: check the stream framing of parts without Oracle
-pqora.py verify /u01/pqora/parts/sales_0001.pqpart
+pqora.py verify /u01/pqora/sales_0001.pqpart
 ```
+
+### Column sizes
+
+`--sample-size all` sizes `VARCHAR2`/`RAW` columns from the data. When a value
+is still too large, the load fails with a message naming every oversize column
+of that part and its largest value. To fix without rescanning the data:
+
+```
+# set sizes yourself (Oracle column name or Parquet path; 'lob' = CLOB/BLOB)
+pqora.py resize /u01/pqora/sales_manifest.json --field-size COMMENT=8000 --field-size user.name=200
+
+# or take them from the failed load's logs (ORACLE_LOADER logs + pqora stream log)
+pqora.py resize /u01/pqora/sales_manifest.json --auto-field-size-fix
+```
+
+`resize` updates the part files and `sales.sql`, and writes `sales_alter.sql`,
+which recreates the external table and widens the target table; then rerun
+the INSERT. `--field-size` and `--auto-field-size-fix` also work on `generate`.
+Sizes above the `VARCHAR2`/`RAW` limit become `CLOB`/`BLOB`, and READSIZE grows
+when needed. `--dry-run` shows the changes only.
 
 Oracle runs `pqora.sh <location file>` for each `.pqpart`; with one argument
 that is a part file, `pqora.py` streams that part's rows to stdout. Everything

@@ -701,14 +701,23 @@ def as_binary(arr):
     return pc.cast(arr, pa.binary())
 
 
-def length_prefixed(arr, width, max_bytes, what):
-    """arr: string/binary array (may contain nulls) -> binary array of
-    '<len zero-padded to width><bytes>', nulls become length 0."""
-    lens = pc.fill_null(pc.binary_length(arr), 0)
-    m = pc.max(lens).as_py() or 0
-    if m > max_bytes:
-        raise StreamError("{}: value of {} bytes exceeds the declared maximum of {} bytes "
-                          "(regenerate the parts/DDL with a larger size)".format(what, m, max_bytes))
+class Oversize(StreamError):
+    """Values larger than declared. problems: {"columns": {name: (max seen, declared)},
+    "record": (largest record, READSIZE) or None}"""
+
+    def __init__(self, problems):
+        self.problems = problems
+        msgs = ["column {}: value of {} bytes exceeds the declared maximum of {} bytes".format(
+            name, seen, declared) for name, (seen, declared) in sorted(problems["columns"].items())]
+        if problems.get("record"):
+            msgs.append("record of {} bytes exceeds READSIZE {}".format(*problems["record"]))
+        StreamError.__init__(self, "; ".join(msgs) + " (fix with: pqora.py resize "
+                                                      "<table>_manifest.json --auto-field-size-fix)")
+
+
+def length_prefixed(arr, width, lens):
+    """arr: string/binary array (may contain nulls), lens: its byte lengths with
+    nulls as 0 -> binary array of '<len zero-padded to width><bytes>'."""
     prefix = as_binary(pc.utf8_lpad(pc.cast(lens, pa.string()), width=width, padding="0"))
     return pc.binary_join_element_wise(prefix, pc.fill_null(as_binary(arr), B_EMPTY), b"")
 
@@ -802,8 +811,9 @@ def column_array(batch, spec):
     return arr
 
 
-def encode_batch(batch, specs, readsize, lob_max):
-    """Returns a binary array with one complete record per row."""
+def encode_batch(batch, specs, readsize, lob_max, problems):
+    """Returns a binary array with one complete record per row, or None if a
+    value or record is larger than declared (recorded in problems)."""
     fields = []
     for spec in specs:
         arr = column_array(batch, spec)
@@ -813,16 +823,26 @@ def encode_batch(batch, specs, readsize, lob_max):
             continue
         width, max_bytes = field_layout(spec, lob_max)
         text = to_text(arr, spec)
+        lens = pc.fill_null(pc.binary_length(text), 0)
+        m = pc.max(lens).as_py() or 0
+        if m > max_bytes:
+            seen = problems["columns"].get(spec["name"], (0, max_bytes))[0]
+            problems["columns"][spec["name"]] = (max(seen, m), max_bytes)
+        if problems["columns"]:
+            continue        # only measuring from now on
         if k in ("clob", "blob"):
             fields.append(pc.if_else(pc.is_null(text), B_N, B_V))
-        fields.append(length_prefixed(text, width, max_bytes, "column " + spec["name"]))
+        fields.append(length_prefixed(text, width, lens))
+    if problems["columns"]:
+        return None
     body = pc.binary_join_element_wise(*(fields + [b""]))
     rec_lens = pc.binary_length(body)
     m = pc.max(rec_lens).as_py() or 0
     if m + REC_WIDTH > readsize:
-        raise StreamError("record of {} bytes exceeds READSIZE {} (regenerate with a larger "
-                          "--max-readsize, or the data has an unexpectedly large value)"
-                          .format(m + REC_WIDTH, readsize))
+        seen = (problems.get("record") or (0, readsize))[0]
+        problems["record"] = (max(seen, m + REC_WIDTH), readsize)
+    if problems.get("record"):
+        return None
     prefix = as_binary(pc.utf8_lpad(pc.cast(rec_lens, pa.string()), width=REC_WIDTH, padding="0"))
     return pc.binary_join_element_wise(prefix, body, b"")
 
@@ -867,6 +887,9 @@ def stream_part(part, out):
         if s["source"][0] not in top:
             top.append(s["source"][0])
     rows = nbytes = 0
+    # after the first oversize value nothing more is written, but the rest of
+    # the part is still measured so the error reports every column's real maximum
+    problems = {"columns": {}, "record": None}
     for src in part["sources"]:
         check_source(src)
         pf = pq.ParquetFile(src["path"], buffer_size=8 * MIB, pre_buffer=False)
@@ -874,11 +897,15 @@ def stream_part(part, out):
                                      columns=top, use_threads=True):
             if batch.num_rows == 0:
                 continue
-            rec = encode_batch(batch, specs, part["readsize"], part["lob_max"])
+            rec = encode_batch(batch, specs, part["readsize"], part["lob_max"], problems)
+            if rec is None or problems["columns"] or problems["record"]:
+                continue
             buf = records_buffer(rec)
             out.write(buf)
             rows += batch.num_rows
             nbytes += len(buf)
+    if problems["columns"] or problems["record"]:
+        raise Oversize(problems)
     if rows != part["rows"]:
         raise StreamError("wrote {} rows but the part expects {}".format(rows, part["rows"]))
     return rows, nbytes
@@ -924,7 +951,13 @@ def run_stream(path):
             msg = "pqora {}: {}: {}: {}".format(VERSION, os.path.basename(path), type(e).__name__, e)
         sys.stderr.write(msg.encode("ascii", "backslashreplace").decode("ascii") + "\n")
         if part:
-            log_line(part, event="end", status="error", error=str(e), seconds=round(time.time() - t0, 3))
+            extra = {}
+            if isinstance(e, Oversize):
+                extra["oversize"] = {n: seen for n, (seen, _) in e.problems["columns"].items()}
+                if e.problems.get("record"):
+                    extra["record_bytes"] = e.problems["record"][0]
+            log_line(part, event="end", status="error", error=str(e),
+                     seconds=round(time.time() - t0, 3), **extra)
         return 1
 
 
@@ -1040,6 +1073,14 @@ def plan_parts(files, target_size):
     return parts
 
 
+def table_part_files(directory, table):
+    """Part files of exactly this table (<table>_<number>.pqpart), not of
+    tables whose names merely start with it (SALES vs SALES_EU)."""
+    pat = re.compile(r"^" + re.escape(table.lower()) + r"_\d+\.pqpart$")
+    return sorted((os.path.join(directory, f) for f in os.listdir(directory) if pat.match(f)),
+                  key=natural_key)
+
+
 def pow2_ceil(n):
     return 1 << int(math.ceil(math.log(max(1, n), 2)))
 
@@ -1092,80 +1133,152 @@ def column_lines(specs):
     return out
 
 
-def write_ddl(path, args, specs, part_names, readsize, lob_max, total_rows, files):
-    ext, tgt = args.ext_table, args.table
-    L = []
-    w = L.append
-    w("-- Generated by pqora.py {} on {}".format(VERSION, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
-    w("-- Source: {} file(s), {:,} rows, {} part(s)".format(len(files), total_rows, len(part_names)))
-    w("-- Directory objects (create as DBA):")
-    w("--   {:<14} -> {}   (READ, EXECUTE)  holds pqora.sh".format(args.exec_dir_object, args.exec_dir or "<exec dir>"))
-    w("--   {:<14} -> {}   (READ)           holds the .pqpart files".format(args.parts_dir_object, args.out_dir))
-    if args.log_dir_object:
-        w("--   {:<14} -> {}   (READ, WRITE)    ORACLE_LOADER log/bad files".format(
-            args.log_dir_object, args.log_dir or "<log dir>"))
-    w("")
-    w("CREATE TABLE {} (".format(q(ext)))
+def dir_objects(st):
+    """[(object, os path, privileges)] in DDL-comment order, merged when the
+    same object is used for several purposes."""
+    objs = []
+    need = [(st["exec_dir_object"], st["exec_dir"], "EXECUTE", "pqora.sh"),
+            (st["parts_dir_object"], st["out_dir"], "READ", ".pqpart files")]
+    if st.get("log_dir_object"):
+        need.append((st["log_dir_object"], st.get("log_dir") or "<log dir>", "WRITE",
+                     "ORACLE_LOADER log/bad files"))
+    for obj, path, priv, what in need:
+        for o in objs:
+            if o[0] == obj:
+                o[2].add(priv)
+                o[3].append(what)
+                break
+        else:
+            objs.append([obj, path, {"READ", priv}, [what]])
+    order = ["READ", "WRITE", "EXECUTE"]
+    return [(o[0], o[1], ", ".join(p for p in order if p in o[2]), ", ".join(o[3])) for o in objs]
+
+
+def ddl_header(st, title):
+    L = ["-- {} (pqora.py {}, {})".format(title, VERSION, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")),
+         "-- Source: {} file(s), {:,} rows, {} part(s)".format(len(st["files"]), st["total_rows"],
+                                                                len(st["location"])),
+         "-- Directory objects (create as DBA, grant to the loading schema):"]
+    for obj, path, privs, what in dir_objects(st):
+        L.append("--   {:<14} -> {}   ({})  {}".format(obj, path, privs, what))
+    return L
+
+
+def ddl_external(st, specs):
+    ext = st["ext_table"]
+    L = ["CREATE TABLE {} (".format(q(ext))]
     L.extend(column_lines(specs))
-    w(")")
-    w("ORGANIZATION EXTERNAL (")
-    w("  TYPE ORACLE_LOADER")
-    w("  DEFAULT DIRECTORY {}".format(args.parts_dir_object))
-    w("  ACCESS PARAMETERS (")
-    w("    RECORDS VARIABLE {}".format(REC_WIDTH))
-    w("    CHARACTERSET AL32UTF8")
-    w("    STRING SIZES ARE IN BYTES")
-    w("    PREPROCESSOR {}:'{}'".format(args.exec_dir_object, args.wrapper_name))
-    w("    READSIZE {}".format(readsize))
-    if args.log_dir_object:
-        w("    BADFILE {}:'{}_%a_%p.bad'".format(args.log_dir_object, ext.lower()))
-        w("    LOGFILE {}:'{}_%a_%p.log'".format(args.log_dir_object, ext.lower()))
+    L += [")",
+          "ORGANIZATION EXTERNAL (",
+          "  TYPE ORACLE_LOADER",
+          "  DEFAULT DIRECTORY {}".format(st["parts_dir_object"]),
+          "  ACCESS PARAMETERS (",
+          "    RECORDS VARIABLE {}".format(REC_WIDTH),
+          "    CHARACTERSET AL32UTF8",
+          "    STRING SIZES ARE IN BYTES",
+          "    PREPROCESSOR {}:'{}'".format(st["exec_dir_object"], st["wrapper_name"]),
+          "    READSIZE {}".format(st["readsize"])]
+    if st.get("log_dir_object"):
+        L.append("    BADFILE {}:'{}_%a_%p.bad'".format(st["log_dir_object"], ext.lower()))
+        L.append("    LOGFILE {}:'{}_%a_%p.log'".format(st["log_dir_object"], ext.lower()))
     else:
-        w("    NOBADFILE")
-        w("    NOLOGFILE")
-    w("    FIELDS (")
-    fl = ddl_fields(specs, lob_max)
+        L += ["    NOBADFILE", "    NOLOGFILE"]
+    L.append("    FIELDS (")
+    fl = ddl_fields(specs, st["lob_max"])
     for i, line in enumerate(fl):
-        w("      " + line + ("," if i < len(fl) - 1 else ""))
-    w("    )")
-    w("  )")
-    w("  LOCATION (")
-    for i, n in enumerate(part_names):
-        w("    " + sql_str(n) + ("," if i < len(part_names) - 1 else ""))
-    w("  )")
-    w(")")
-    w("REJECT LIMIT 0")
-    w("PARALLEL {};".format(args.dop))
-    w("")
-    w("CREATE TABLE {} (".format(q(tgt)))
-    L.extend(column_lines(specs))
-    w(");")
-    w("")
-    w("ALTER SESSION ENABLE PARALLEL DML;")
-    w("")
-    w("INSERT /*+ APPEND PARALLEL({}) */ INTO {}".format(args.dop, q(tgt)))
-    w("SELECT /*+ PARALLEL({}) */ * FROM {};".format(args.dop, q(ext)))
-    w("")
-    w("COMMIT;")
-    w("")
-    w("-- expected row count: {}".format(total_rows))
-    w("SELECT COUNT(*) AS loaded_rows, {} AS expected_rows FROM {};".format(total_rows, q(tgt)))
+        L.append("      " + line + ("," if i < len(fl) - 1 else ""))
+    L += ["    )", "  )", "  LOCATION ("]
+    for i, n in enumerate(st["location"]):
+        L.append("    " + sql_str(n) + ("," if i < len(st["location"]) - 1 else ""))
+    L += ["  )", ")", "REJECT LIMIT 0", "PARALLEL {};".format(st["dop"])]
+    return L
+
+
+def ddl_target(st, specs):
+    return ["CREATE TABLE {} (".format(q(st["table"]))] + column_lines(specs) + [");"]
+
+
+def ddl_load(st):
+    tgt, ext, dop = q(st["table"]), q(st["ext_table"]), st["dop"]
+    return ["ALTER SESSION ENABLE PARALLEL DML;",
+            "",
+            "INSERT /*+ APPEND PARALLEL({}) */ INTO {}".format(dop, tgt),
+            "SELECT /*+ PARALLEL({}) */ * FROM {};".format(dop, ext),
+            "",
+            "COMMIT;",
+            "",
+            "-- expected row count: {}".format(st["total_rows"]),
+            "SELECT COUNT(*) AS loaded_rows, {} AS expected_rows FROM {};".format(st["total_rows"], tgt)]
+
+
+def write_lines(path, lines):
     with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(L) + "\n")
+        fh.write("\n".join(lines) + "\n")
 
 
-def write_wrapper(path, python, script, pythonpath):
+def ddl_path(st, suffix=""):
+    return os.path.join(st["ddl_dir"], st["table"].lower() + suffix + ".sql")
+
+
+def write_ddl(st, specs):
+    path = ddl_path(st)
+    write_lines(path, ddl_header(st, "Generated") + [""] + ddl_external(st, specs) + [""]
+                + ddl_target(st, specs) + [""] + ddl_load(st))
+    return path
+
+
+def write_alter(st, specs, changed):
+    """SQL that recreates the external table and widens the target table."""
+    L = ddl_header(st, "Column size changes")
+    L += ["-- Recreates the external table with the new sizes and widens the",
+          "-- target table. Then rerun the INSERT from {}.".format(os.path.basename(ddl_path(st))),
+          "",
+          "DROP TABLE {} PURGE;".format(q(st["ext_table"])),
+          ""]
+    L += ddl_external(st, specs)
+    L.append("")
+    by_name = {s["name"]: s for s in specs}
+    for name in changed:
+        s = by_name[name]
+        if s["kind"] in ("text", "raw"):
+            L.append("ALTER TABLE {} MODIFY ({} {});".format(q(st["table"]), q(name), s["otype"]))
+        else:
+            L.append("-- {} is now {}: Oracle can't MODIFY a VARCHAR2/RAW column to a LOB.".format(
+                q(name), s["otype"]))
+            L.append("-- If {} is still empty, drop and recreate it with the CREATE TABLE in {}."
+                     .format(q(st["table"]), os.path.basename(ddl_path(st))))
+    path = ddl_path(st, "_alter")
+    write_lines(path, L)
+    return path
+
+
+def wrapper_text(python, script, pythonpath):
     lines = ["#!/bin/sh",
-             "# pqora preprocessor wrapper (generated by pqora.py {}).".format(VERSION),
+             "# pqora preprocessor wrapper (generated by pqora.py).",
              "# Oracle runs this as the database OS user with an empty environment and",
              "# passes one argument: the full path of a .pqpart location file."]
     if pythonpath:
         lines.append("PYTHONPATH={}".format(pythonpath))
         lines.append("export PYTHONPATH")
     lines.append('exec {} {} "$1"'.format(python, script))
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    os.chmod(path, 0o755)
+    return "\n".join(lines) + "\n"
+
+
+def wrapper_state(path, text):
+    """'same', 'write' or an error message."""
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                if fh.read() == text:
+                    return "same"
+        except OSError:
+            pass
+        if not os.access(path, os.W_OK):
+            return "{} exists with different content and is not writable by this user".format(path)
+        return "write"
+    if not os.access(os.path.dirname(path), os.W_OK):
+        return "cannot create {} (directory not writable)".format(path)
+    return "write"
 
 
 def detect_pythonpath():
@@ -1179,15 +1292,207 @@ def detect_pythonpath():
     return loc
 
 
+# ---------------------------------------------------------------------------
+# column size changes (--field-size, --auto-field-size-fix)
+# ---------------------------------------------------------------------------
+
+def size_limits(max_string_size):
+    """(VARCHAR2 limit, RAW limit)"""
+    return (32767, 32767) if max_string_size == "extended" else (4000, 2000)
+
+
+def parse_field_size(s):
+    if "=" not in s:
+        raise argparse.ArgumentTypeError("expected COLUMN=SIZE, got {!r}".format(s))
+    col, size = s.rsplit("=", 1)
+    size = size.strip()
+    if size.lower() in ("lob", "clob", "blob"):
+        return col.strip(), "lob"
+    n = parse_size(size)
+    if n == float("inf") or n <= 0:
+        raise argparse.ArgumentTypeError("invalid size in {!r}".format(s))
+    return col.strip(), int(n)
+
+
+def find_spec(specs, key):
+    for s in specs:
+        if s["name"] == key.upper() or s["name"] == key or ".".join(s["source"]).lower() == key.lower():
+            return s
+    sys.exit("ERROR: no column {!r}; columns are: {}".format(key, ", ".join(s["name"] for s in specs)))
+
+
+LOG_PATTERNS = [
+    ("column", re.compile(r"column (\S+?): value of (\d+) bytes exceeds the declared maximum")),
+    ("column", re.compile(r"ORA-12899: value too large for column (\S+) \(actual: (\d+), maximum: \d+\)")),
+    ("record", re.compile(r"record of (\d+) bytes exceeds READSIZE")),
+]
+
+
+def scan_logs(log_dir, ext_table, table):
+    """Size problems reported in this table's ORACLE_LOADER logs and pqora
+    stream log: ({column: largest size seen}, largest record or 0, files)."""
+    cols, record, files = {}, 0, []
+    if not log_dir or not os.path.isdir(log_dir):
+        return cols, record, files
+    pat = re.compile(r"^(" + re.escape(ext_table.lower()) + r"_.*\.log|"
+                     + re.escape(table.lower()) + r"_stream\.log)$")
+    for f in sorted(os.listdir(log_dir)):
+        if not pat.match(f):
+            continue
+        path = os.path.join(log_dir, f)
+        files.append(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                for kind, rx in LOG_PATTERNS:
+                    for m in rx.finditer(line):
+                        if kind == "record":
+                            record = max(record, int(m.group(1)))
+                        else:
+                            name = m.group(1).split(".")[-1].strip('"')
+                            cols[name] = max(cols.get(name, 0), int(m.group(2)))
+    return cols, record, files
+
+
+def to_lob(spec):
+    spec["kind"] = "clob" if spec["kind"] == "text" else "blob"
+    spec["otype"] = spec["kind"].upper()
+    spec.pop("max", None)
+
+
+def apply_size_changes(specs, manual, found, st):
+    """Apply manual (column, size|'lob') and found {column: bytes seen} changes.
+    Returns (descriptions, changed column names, {lob column: size hint})."""
+    var_limit, raw_limit = size_limits(st["max_string_size"])
+    margin = st.get("margin", 1.25)
+    changes, changed, lob_hints = [], [], {}
+
+    def resize(spec, size, how):
+        k = spec["kind"]
+        if k not in ("text", "raw", "clob", "blob"):
+            return "{}: {} column ({}), size can't be changed - ignored".format(spec["name"], k, spec["otype"])
+        limit = var_limit if k in ("text", "clob") else raw_limit
+        old = spec["otype"]
+        if k in ("clob", "blob"):
+            if size != "lob":
+                lob_hints[spec["name"]] = max(lob_hints.get(spec["name"], 0), size)
+            return None
+        if size == "lob" or size > limit:
+            to_lob(spec)
+            if size != "lob":
+                lob_hints[spec["name"]] = size
+        elif how == "auto":
+            new = nice_size(size, margin, limit)
+            if new <= spec["max"]:
+                return None
+            spec["max"] = new
+        else:
+            spec["max"] = size
+        if spec["kind"] == "text":
+            spec["otype"] = "VARCHAR2({} BYTE)".format(spec["max"])
+        elif spec["kind"] == "raw":
+            spec["otype"] = "RAW({})".format(spec["max"])
+        spec["note"] = "{} size{}".format("manual" if how == "manual" else "auto-fixed",
+                                          "" if size == "lob" else ", seen/requested {} B".format(size))
+        changed.append(spec["name"])
+        shrink = spec["kind"] in ("text", "raw") and old != spec["otype"] and \
+            spec["max"] < int(re.sub(r"\D", "", old) or 0)
+        return "{}: {} -> {}{}".format(spec["name"], old, spec["otype"],
+                                       "  (SMALLER - values above it will fail)" if shrink else "")
+
+    for key, size in manual:
+        d = resize(find_spec(specs, key), size, "manual")
+        if d:
+            changes.append(d)
+    by_name = {s["name"]: s for s in specs}
+    for name, seen in sorted(found.items()):
+        if name not in by_name:
+            changes.append("{}: reported in a log but not a column of this table - ignored".format(name))
+            continue
+        d = resize(by_name[name], seen, "auto")
+        if d:
+            changes.append(d)
+    return changes, changed, lob_hints
+
+
+def required_readsize(specs, lob_hints):
+    need = REC_WIDTH
+    for s in specs:
+        if s["kind"] in ("clob", "blob"):
+            need += 1 + LOB_WIDTH + lob_hints.get(s["name"], 0)
+        else:
+            need += field_max_bytes(s, 0)
+    return need
+
+
+def grow_readsize(st, specs, lob_hints, record_seen):
+    """New READSIZE so the largest known record fits (never shrinks)."""
+    cap = st["max_readsize"]
+    exact = max(required_readsize(specs, lob_hints), record_seen)
+    want = max(exact * 2 if lob_hints else exact, int(record_seen * st.get("margin", 1.25)))
+    rs = max(st["readsize"], min(cap, max(MIB, pow2_ceil(want))))
+    if exact > cap:
+        warn("records of {:,} bytes need a READSIZE above the --max-readsize limit {:,}; "
+             "such rows will still fail".format(exact, cap))
+    return rs
+
+
+# ---------------------------------------------------------------------------
+# generate / resize
+# ---------------------------------------------------------------------------
+
 def run_generate(args):
     paths = expand_inputs(args.paths)
     if not paths:
         sys.exit("ERROR: no input files")
+
+    # directories and directory objects: everything defaults to the parts directory
+    out_dir = os.path.abspath(args.out_dir)
+    parts_obj = ident(args.parts_dir_object, "--parts-dir-object")
+    exec_obj = ident(args.exec_dir_object, "--exec-dir-object") if args.exec_dir_object else parts_obj
+    if args.log_dir_object == "":
+        log_obj = None
+    else:
+        log_obj = ident(args.log_dir_object, "--log-dir-object") if args.log_dir_object else parts_obj
+    if args.exec_dir:
+        exec_dir = os.path.abspath(args.exec_dir)
+    elif exec_obj == parts_obj:
+        exec_dir = out_dir
+    else:
+        sys.exit("ERROR: --exec-dir (OS path of {}) is required when it differs from "
+                 "--parts-dir-object".format(exec_obj))
+    if args.log_dir:
+        log_dir = os.path.abspath(args.log_dir)
+    elif log_obj == parts_obj:
+        log_dir = out_dir
+    else:
+        log_dir = None
+        warn("no --log-dir: the stream log is disabled and --auto-field-size-fix can't find the logs")
+    ddl_dir = os.path.abspath(args.ddl_dir) if args.ddl_dir else out_dir
+    for d in (out_dir, exec_dir, log_dir, ddl_dir):
+        if d:
+            os.makedirs(d, exist_ok=True)
+            if not os.access(d, os.W_OK):
+                sys.exit("ERROR: directory {} is not writable".format(d))
+    script = os.path.abspath(args.script or __file__)
+    python = os.path.abspath(args.python or sys.executable)
+    wrapper = os.path.join(exec_dir, args.wrapper_name)
+    wtext = wrapper_text(python, script, args.pythonpath if args.pythonpath is not None
+                         else detect_pythonpath())
+    wstate = wrapper_state(wrapper, wtext)
+    if wstate not in ("same", "write"):
+        sys.exit("ERROR: " + wstate)
+
     files, columns = load_files(paths)
     schema = pq.read_schema(files[0].path)
     for fi in files[1:]:
         if not pq.read_schema(fi.path).equals(schema, check_metadata=False):
-            sys.exit("ERROR: schema of {} differs from {}".format(fi.path, files[0].path))
+            sys.exit("ERROR: schema of {} differs from {} (one generate run = one table)".format(
+                fi.path, files[0].path))
+
+    base = os.path.splitext(os.path.basename(files[0].path))[0]
+    namer = Namer(args.max_name_len)
+    table = ident(args.table or namer.name((base,)), "--table")
+    ext_table = ident(args.ext_table or (table + "_EXT")[:args.max_name_len], "--ext-table")
 
     maxes, sampled = {}, False
     if args.sample_size:
@@ -1204,14 +1509,6 @@ def run_generate(args):
         for k in range(1, len(parts_) + 1):
             key = ".".join(parts_[:k])
             column_avg[key] = column_avg.get(key, 0) + c["uncompressed"] / float(max(1, total_rows))
-
-    base = os.path.splitext(os.path.basename(files[0].path))[0]
-    namer = Namer(args.max_name_len)
-    args.table = ident(args.table or namer.name((base,)), "--table")
-    args.ext_table = ident(args.ext_table or (args.table + "_EXT")[:args.max_name_len], "--ext-table")
-    for a in ("exec_dir_object", "parts_dir_object", "log_dir_object"):
-        if getattr(args, a):
-            setattr(args, a, ident(getattr(args, a), "--" + a.replace("_", "-")))
 
     specs = build_specs(schema, args, maxes, sampled, column_avg)
 
@@ -1230,28 +1527,38 @@ def run_generate(args):
         readsize = min(args.max_readsize, max(MIB, pow2_ceil(est)))
     if args.readsize:
         readsize = args.readsize
-    lob_max = readsize - REC_WIDTH - 1 - LOB_WIDTH
+
+    st = {"table": table, "ext_table": ext_table,
+          "parts_dir_object": parts_obj, "exec_dir_object": exec_obj, "log_dir_object": log_obj,
+          "out_dir": out_dir, "exec_dir": exec_dir, "log_dir": log_dir, "ddl_dir": ddl_dir,
+          "wrapper_name": args.wrapper_name, "dop": args.dop,
+          "max_string_size": args.max_string_size, "max_readsize": args.max_readsize,
+          "margin": args.margin, "readsize": readsize,
+          "files": [f.path for f in files], "total_rows": total_rows}
+
+    # explicit and log-derived size changes
+    found, record_seen = {}, 0
+    if args.auto_field_size_fix:
+        found, record_seen, logs = scan_logs(log_dir, ext_table, table)
+        sys.stderr.write("Scanned {} log file(s) for size errors\n".format(len(logs)))
+    changes, _, lob_hints = apply_size_changes(specs, args.field_size or [], found, st)
+    if changes or record_seen:
+        st["readsize"] = readsize = grow_readsize(st, specs, lob_hints, record_seen) \
+            if not args.readsize else args.readsize
+    lob_max = st["lob_max"] = readsize - REC_WIDTH - 1 - LOB_WIDTH
     if est and est > readsize:
         warn("estimated maximum record size {:,} exceeds READSIZE {:,}; rows that large will "
              "fail the load".format(est, readsize))
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    out_dir = os.path.abspath(args.out_dir)
-    args.out_dir = out_dir
     parts = plan_parts(files, args.target_size)
     width = max(4, len(str(len(parts))))
-    script = os.path.abspath(args.script or __file__)
-    python = os.path.abspath(args.python or sys.executable)
-    log_file = None
-    if args.log_dir:
-        os.makedirs(args.log_dir, exist_ok=True)
-        log_file = os.path.join(os.path.abspath(args.log_dir), args.table.lower() + "_stream.log")
+    log_file = os.path.join(log_dir, table.lower() + "_stream.log") if log_dir else None
 
-    for old in glob.glob(os.path.join(out_dir, args.table.lower() + "_*.pqpart")):
+    for old in table_part_files(out_dir, table):
         os.remove(old)
     part_entries = []
     for i, rgs in enumerate(parts, 1):
-        name = "{}_{:0{w}d}.pqpart".format(args.table.lower(), i, w=width)
+        name = "{}_{:0{w}d}.pqpart".format(table.lower(), i, w=width)
         sources = []
         for rg in rgs:
             if not sources or sources[-1]["path"] != rg.file:
@@ -1271,7 +1578,7 @@ def run_generate(args):
             PART_MAGIC: PART_FORMAT,
             "pqora_version": VERSION,
             "generated": datetime.datetime.now().isoformat(),
-            "table": args.table, "ext_table": args.ext_table,
+            "table": table, "ext_table": ext_table,
             "part": i, "parts": len(parts),
             "rows": rows,
             "readsize": readsize, "lob_max": lob_max,
@@ -1284,32 +1591,111 @@ def run_generate(args):
         part_entries.append((name, rows, sum(rg.uncompressed for rg in rgs)))
 
     # biggest parts first in LOCATION so the long ones start early
-    location = [n for n, _, _ in sorted(part_entries, key=lambda e: -e[2])]
-    ddl_path = os.path.join(args.ddl_dir or out_dir, args.table.lower() + ".sql")
-    write_ddl(ddl_path, args, specs, location, readsize, lob_max, total_rows, files)
-
-    wrapper_dir = args.exec_dir or out_dir
-    os.makedirs(wrapper_dir, exist_ok=True)
-    wrapper = os.path.join(wrapper_dir, args.wrapper_name)
-    write_wrapper(wrapper, python, script, args.pythonpath if args.pythonpath is not None
-                  else detect_pythonpath())
-
-    manifest = os.path.join(out_dir, args.table.lower() + "_manifest.json")
-    with open(manifest, "w", encoding="utf-8") as fh:
-        json.dump({"table": args.table, "rows": total_rows, "readsize": readsize,
-                   "parts": [{"name": n, "rows": r, "uncompressed": u} for n, r, u in part_entries]},
-                  fh, indent=1)
+    st["location"] = [n for n, _, _ in sorted(part_entries, key=lambda e: -e[2])]
+    ddl_file = write_ddl(st, specs)
+    if wstate == "write":
+        with open(wrapper, "w", encoding="utf-8") as fh:
+            fh.write(wtext)
+        os.chmod(wrapper, 0o755)
+    manifest = write_manifest(st, specs, [{"name": n, "rows": r, "uncompressed": u}
+                                          for n, r, u in part_entries])
 
     print("Parts    : {} x .pqpart in {}  ({:,} rows)".format(len(parts), out_dir, total_rows))
-    print("DDL      : {}".format(ddl_path))
-    print("Wrapper  : {}  -> {} {}".format(wrapper, python, script))
+    print("DDL      : {}".format(ddl_file))
+    print("Wrapper  : {}  -> {} {}{}".format(wrapper, python, script,
+                                             "  (unchanged)" if wstate == "same" else ""))
     print("Manifest : {}".format(manifest))
     print("READSIZE : {:,}".format(readsize))
+    print("Dir objs : " + "; ".join("{} -> {} ({})".format(o, p, pr) for o, p, pr, _ in dir_objects(st)))
     if log_file:
         print("Log file : {}".format(log_file))
+    for c in changes:
+        print("Resized  : " + c)
     if not sampled and any(s["kind"] == "text" for s in specs):
         print("Note     : VARCHAR2 sizes are defaults; use --sample-size (or 'all') to size them "
               "from the data.")
+    return 0
+
+
+def manifest_path(st):
+    return os.path.join(st["out_dir"], st["table"].lower() + "_manifest.json")
+
+
+def write_manifest(st, specs, parts):
+    path = manifest_path(st)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"table": st["table"], "rows": st["total_rows"], "readsize": st["readsize"],
+                   "settings": st, "columns": specs, "parts": parts}, fh, indent=1)
+    return path
+
+
+def run_resize(args):
+    target = os.path.abspath(args.target)
+    if target.endswith(".pqpart"):
+        part = read_part(target)
+        target = os.path.join(os.path.dirname(target), part["table"].lower() + "_manifest.json")
+    try:
+        with open(target, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+    except (OSError, ValueError) as e:
+        sys.exit("ERROR: cannot read manifest {}: {}".format(target, e))
+    st = manifest.get("settings")
+    if not st:
+        sys.exit("ERROR: {} was written by an older pqora; rerun generate once".format(target))
+    parts_dir = os.path.dirname(target)
+    part_files = table_part_files(parts_dir, st["table"])
+    if not part_files:
+        sys.exit("ERROR: no part files of {} in {}".format(st["table"], parts_dir))
+    specs = read_part(part_files[0])["columns"]
+
+    found, record_seen, logs = {}, 0, []
+    if args.auto_field_size_fix:
+        log_dir = os.path.abspath(args.log_dir) if args.log_dir else st.get("log_dir")
+        if not log_dir:
+            sys.exit("ERROR: no log directory known for {}; pass --log-dir".format(st["table"]))
+        found, record_seen, logs = scan_logs(log_dir, st["ext_table"], st["table"])
+        print("Scanned {} log file(s) in {}".format(len(logs), log_dir))
+        for name, seen in sorted(found.items()):
+            print("  {:<32} largest value reported: {:,} bytes".format(name, seen))
+        if record_seen:
+            print("  {:<32} largest record reported: {:,} bytes".format("(READSIZE)", record_seen))
+    if not args.field_size and not found and not record_seen:
+        print("Nothing to change.")
+        return 0
+
+    old_rs = st["readsize"]
+    changes, changed, lob_hints = apply_size_changes(specs, args.field_size or [], found, st)
+    new_rs = grow_readsize(st, specs, lob_hints, record_seen)
+    if new_rs != old_rs:
+        changes.append("READSIZE: {:,} -> {:,}".format(old_rs, new_rs))
+    for c in changes:
+        print("Change   : " + c)
+    if not changed and new_rs == old_rs:
+        print("Nothing to change (sizes are already large enough).")
+        return 0
+    if args.dry_run:
+        print("Dry run - nothing written.")
+        return 0
+
+    st["readsize"] = new_rs
+    st["lob_max"] = new_rs - REC_WIDTH - 1 - LOB_WIDTH
+    for f in part_files:
+        p = read_part(f)
+        p["columns"] = specs
+        p["readsize"], p["lob_max"] = st["readsize"], st["lob_max"]
+        p["resized"] = datetime.datetime.now().isoformat()
+        with open(f, "w", encoding="utf-8") as fh:
+            json.dump(p, fh, indent=1)
+    ddl_file = write_ddl(st, specs)
+    alter_file = write_alter(st, specs, changed)
+    write_manifest(st, specs, manifest.get("parts", []))
+    print("Updated  : {} part file(s), {}, {}".format(len(part_files), os.path.basename(ddl_file),
+                                                      os.path.basename(manifest_path(st))))
+    print("Next     : run {}".format(alter_file))
+    print("           (recreates {}, widens {}), then rerun the INSERT".format(st["ext_table"], st["table"]))
+    if logs:
+        print("Tip      : old log files are re-read on every --auto-field-size-fix; sizes only grow, "
+              "so this is harmless, but you can delete them after a successful load.")
     return 0
 
 
@@ -1326,6 +1712,16 @@ def is_part_file(path):
         return head.lstrip().startswith(b'{') and PART_MAGIC.encode() in head
     except OSError:
         return False
+
+
+def add_size_fix(ap):
+    ap.add_argument("--field-size", type=parse_field_size, action="append", metavar="COLUMN=SIZE",
+                    help="set a column's size in bytes (repeatable). COLUMN is the Oracle column "
+                         "name or the Parquet path (a.b); SIZE like 500, 8K or 'lob'. Sizes above the "
+                         "VARCHAR2/RAW limit become CLOB/BLOB")
+    ap.add_argument("--auto-field-size-fix", action="store_true",
+                    help="read this table's ORACLE_LOADER logs and pqora stream log and enlarge every "
+                         "column (and READSIZE) that a load reported as too small")
 
 
 def add_common(ap):
@@ -1354,17 +1750,22 @@ def main(argv=None):
             description="Write .pqpart control files, the ORACLE_LOADER DDL and the preprocessor wrapper.")
         ap.add_argument("paths", nargs="+", help="Parquet files, globs or directories")
         ap.add_argument("--out-dir", required=True,
-                        help="where to write the .pqpart files (the PARTS directory object path)")
+                        help="where to write the .pqpart files (OS path of --parts-dir-object)")
         ap.add_argument("--table", help="target table name (default: first file name)")
         ap.add_argument("--ext-table", help="external table name (default: <table>_EXT)")
-        ap.add_argument("--exec-dir", help="OS path of the EXEC directory object; pqora.sh is written "
-                                           "there (default: --out-dir)")
-        ap.add_argument("--log-dir", help="OS path of the LOG directory object; stream mode appends "
-                                          "one JSON line per part run to <table>_stream.log there")
-        ap.add_argument("--exec-dir-object", default="PQORA_EXEC")
-        ap.add_argument("--parts-dir-object", default="PQORA_PARTS")
-        ap.add_argument("--log-dir-object", default="PQORA_LOG",
-                        help="directory object for ORACLE_LOADER log/bad files ('' = none)")
+        ap.add_argument("--parts-dir-object", default="PQORA_PARTS",
+                        help="directory object of --out-dir (default PQORA_PARTS); the exec and log "
+                             "objects default to it, so one object with READ, WRITE, EXECUTE is enough")
+        ap.add_argument("--exec-dir-object",
+                        help="directory object holding pqora.sh (default: --parts-dir-object)")
+        ap.add_argument("--log-dir-object",
+                        help="directory object for ORACLE_LOADER log/bad files (default: "
+                             "--parts-dir-object; '' = no log files)")
+        ap.add_argument("--exec-dir", help="OS path of --exec-dir-object; pqora.sh is written there "
+                                           "(default: --out-dir when the objects are the same)")
+        ap.add_argument("--log-dir", help="OS path of --log-dir-object; stream mode appends one JSON "
+                                          "line per part run to <table>_stream.log there (default: "
+                                          "--out-dir when the objects are the same)")
         ap.add_argument("--ddl-dir", help="where to write <table>.sql (default: --out-dir)")
         ap.add_argument("--wrapper-name", default="pqora.sh")
         ap.add_argument("--python", help="python interpreter for the wrapper (default: this one)")
@@ -1385,14 +1786,27 @@ def main(argv=None):
                         help="upper limit for READSIZE (default 128MB); the largest record must fit")
         ap.add_argument("--readsize", type=parse_size, help="force READSIZE")
         ap.add_argument("--dop", type=int, default=8, help="PARALLEL degree in the DDL (default 8)")
+        add_size_fix(ap)
         a = ap.parse_args(argv[1:])
-        if a.log_dir_object == "":
-            a.log_dir_object = None
         return run_generate(a)
+
+    if argv and argv[0] == "resize":
+        ap = argparse.ArgumentParser(
+            prog="pqora.py resize",
+            description="Change column sizes of an already generated table without rescanning the "
+                        "data: updates the part files, <table>.sql and writes <table>_alter.sql.")
+        ap.add_argument("target", help="<table>_manifest.json or any .pqpart file of the table")
+        add_size_fix(ap)
+        ap.add_argument("--log-dir", help="where the logs are (default: the generate --log-dir)")
+        ap.add_argument("--dry-run", action="store_true", help="only show the changes")
+        a = ap.parse_args(argv[1:])
+        if not a.field_size and not a.auto_field_size_fix:
+            ap.error("give --field-size and/or --auto-field-size-fix")
+        return run_resize(a)
 
     ap = argparse.ArgumentParser(
         description="pqora {}: Parquet -> Oracle external table preprocessor. Default mode "
-                    "inspects Parquet files; see also 'generate' and 'verify'.".format(VERSION))
+                    "inspects Parquet files; see also 'generate', 'resize' and 'verify'.".format(VERSION))
     ap.add_argument("paths", nargs="+", help="Parquet files, globs or directories")
     ap.add_argument("--dop-list", default="2,4,8,16,32,64")
     ap.add_argument("--list-rowgroups", action="store_true")
