@@ -258,7 +258,7 @@ def print_inspect(files, columns, dops, list_rowgroups, target_size, out):
     p("Files            : {}".format(len(files)))
     p("Rows             : {:,}".format(total_rows))
     p("Row groups       : {:,}".format(len(rgs)))
-    p("Size on disk     : {}".format(human(sum(f.disk_size for f in files))))
+    p("File size        : {}".format(human(sum(f.disk_size for f in files))))
     p("Compressed data  : {}".format(human(total_comp)))
     p("Uncompressed data: {}".format(human(total_unc))
       + ("   (ratio {:.2f}x)".format(total_unc / float(total_comp)) if total_comp else ""))
