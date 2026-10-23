@@ -237,7 +237,7 @@ fi
 
 drop_tables() {
     for t in $TABLES; do
-        echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"${t}_EXT\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
+        echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"EXT_${t}\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
         echo "/"
         echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"${t}\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
         echo "/"
@@ -288,13 +288,13 @@ check() {   # check LABEL PART_TABLE ORACLE_TABLE DOP [session statements...]
 }
 step "data checks"
 SINCE="$(now)"
-check types_ext PQK_TYPES PQK_TYPES_EXT 4
+check types_ext PQK_TYPES EXT_PQK_TYPES 4
 check types_loaded PQK_TYPES PQK_TYPES 4
-check big_ext PQK_BIG PQK_BIG_EXT 8
+check big_ext PQK_BIG EXT_PQK_BIG 8
 check big_loaded PQK_BIG PQK_BIG 8
-check blobs_ext PQK_BLOBS PQK_BLOBS_EXT 4
+check blobs_ext PQK_BLOBS EXT_PQK_BLOBS 4
 check blobs_loaded PQK_BLOBS PQK_BLOBS 4
-check types_ext_nls PQK_TYPES PQK_TYPES_EXT 4 \
+check types_ext_nls PQK_TYPES EXT_PQK_TYPES 4 \
     "ALTER SESSION SET NLS_NUMERIC_CHARACTERS = ',.';" \
     "ALTER SESSION SET NLS_DATE_FORMAT = 'DD.MM.RR';" \
     "ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'DD.MM.RR HH24.MI.SSXFF';" \
@@ -313,12 +313,12 @@ done
 for d in $DOPS; do
     s="$(now)"
     run_sql "perf_dop$d" <<EOF
-SELECT /*+ PARALLEL($d) */ 'PERF|' || COUNT(*) || '|' || SUM(LENGTHB("NAME")) FROM "PQK_BIG_EXT";
+SELECT /*+ PARALLEL($d) */ 'PERF|' || COUNT(*) || '|' || SUM(LENGTHB("NAME")) FROM "EXT_PQK_BIG";
 EOF
     el="$(grep 'Elapsed' "$REP/perf_dop$d.out" | tail -1 | awk '{print $2}')"
     conc="$("$PY" "$KIT/pqora_selftest.py" parallel "$WORK/log/pqk_big_stream.log" PQK_BIG --since "$s" | sed 's/.*max concurrent=\([0-9]*\).*/\1/')"
     if grep -q '^PERF|' "$REP/perf_dop$d.out"; then
-        result INFO "scan PQK_BIG_EXT ($BIG_ROWS rows) at DOP $d: elapsed $el, max concurrent preprocessors $conc"
+        result INFO "scan EXT_PQK_BIG ($BIG_ROWS rows) at DOP $d: elapsed $el, max concurrent preprocessors $conc"
     else
         result FAIL "scan at DOP $d: $(errors "$REP/perf_dop$d.out" | head -1)"
     fi
@@ -328,7 +328,7 @@ done
 step "edge cases"
 s="$(now)"
 run_sql rownum <<EOF
-SELECT 'ROWNUM|' || COUNT(*) FROM (SELECT * FROM "PQK_BIG_EXT" WHERE ROWNUM <= 10);
+SELECT 'ROWNUM|' || COUNT(*) FROM (SELECT * FROM "EXT_PQK_BIG" WHERE ROWNUM <= 10);
 EOF
 el="$(grep 'Elapsed' "$REP/rownum.out" | tail -1 | awk '{print $2}')"
 if grep -q '^ROWNUM|10' "$REP/rownum.out"; then
@@ -338,7 +338,7 @@ else
 fi
 
 run_sql error_changed_file <<EOF
-SELECT 'ERRTEST|' || COUNT(*) FROM "PQK_ERR_EXT";
+SELECT 'ERRTEST|' || COUNT(*) FROM "EXT_PQK_ERR";
 EOF
 if grep -q 'has changed' "$REP/error_changed_file.out"; then
     result PASS "changed Parquet file is refused; Oracle shows: $(grep -m1 -o 'pqora[^"]*has changed[^"]*' "$REP/error_changed_file.out" | cut -c1-120)"
@@ -349,7 +349,7 @@ else
 fi
 
 run_sql error_calendar_gap <<EOF
-SELECT 'GAPTEST|' || COUNT(*) FROM "PQK_GAP_EXT";
+SELECT 'GAPTEST|' || COUNT(*) FROM "EXT_PQK_GAP";
 EOF
 if grep -q '1582-10-05' "$REP/error_calendar_gap.out"; then
     result PASS "date in the 1582 calendar gap is refused"

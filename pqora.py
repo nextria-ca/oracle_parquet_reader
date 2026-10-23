@@ -39,6 +39,7 @@ import datetime
 import glob
 import hashlib
 import heapq
+import io
 import json
 import math
 import os
@@ -65,6 +66,7 @@ DATE_MASK = "YYYY-MM-DD"
 MIB = 1024 * 1024
 DEFAULT_MAX_READSIZE = 128 * MIB   # 512 MiB hung on 23ai in testing
 BATCH_TARGET_BYTES = 64 * MIB
+DEFAULT_DOPS = [2, 4, 8, 16, 32, 64]
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +403,11 @@ def is_json_type(t):
             or _is("is_union", t))
 
 
+def is_list_type(t):
+    return (_is("is_list", t) or _is("is_large_list", t) or _is("is_fixed_size_list", t)
+            or _is("is_list_view", t) or _is("is_large_list_view", t))
+
+
 def needs_sampling(t):
     t = unwrap(t)
     if pa.types.is_struct(t):
@@ -518,18 +525,19 @@ class Namer(object):
         self.max_len = max_len
         self.used = set()
 
-    def name(self, parts):
-        raw = "#".join(re.sub(r"[^A-Za-z0-9_$#]", "_", p).upper() for p in parts)
-        if not raw or not raw[0].isalpha():
-            raw = "C_" + raw
-        name = raw
-        if len(name) > self.max_len:
+    def name(self, parts, suffix=""):
+        """Oracle name for a column path; suffix (e.g. '_LST') is always kept."""
+        stem = "#".join(re.sub(r"[^A-Za-z0-9_$#]", "_", p).upper() for p in parts)
+        if not stem or not stem[0].isalpha():
+            stem = "C_" + stem
+        limit = self.max_len - len(suffix)
+        if len(stem) > limit:
             h = hashlib.sha1("\x00".join(parts).encode("utf-8")).hexdigest()[:8].upper()
-            name = name[:self.max_len - 9] + "_" + h
-        base, k = name, 2
+            stem = stem[:limit - 9] + "_" + h
+        name, k = stem + suffix, 2
         while name in self.used:
-            suffix = "_{}".format(k)
-            name = base[:self.max_len - len(suffix)] + suffix
+            dup = "_{}".format(k)
+            name = stem[:limit - len(dup)] + dup + suffix
             k += 1
         self.used.add(name)
         return name
@@ -599,7 +607,7 @@ def build_specs(schema, args, maxes, sampled, column_avg):
         return min(default, limit), "default size"
 
     def add(path, t, spec, note):
-        spec["name"] = namer.name(path)
+        spec["name"] = namer.name(path, "_LST" if is_list_type(unwrap(t)) else "")
         spec["source"] = list(path)
         spec["arrow"] = str(t)
         spec["note"] = note
@@ -1220,10 +1228,22 @@ def ddl_path(st, suffix=""):
     return os.path.join(st["ddl_dir"], st["table"].lower() + suffix + ".sql")
 
 
+def report_comment(st):
+    """The inspect report of the source files as SQL comment lines."""
+    text = st.get("inspect_report")
+    if not text:
+        return []
+    L = ["", "", "-- " + "-" * 75,
+         "-- Source file report at generate time (same as: pqora.py <files>)",
+         "-- " + "-" * 75]
+    L += [("-- " + line).rstrip() for line in text.rstrip("\n").split("\n")]
+    return L
+
+
 def write_ddl(st, specs):
     path = ddl_path(st)
     write_lines(path, ddl_header(st, "Generated") + [""] + ddl_external(st, specs) + [""]
-                + ddl_target(st, specs) + [""] + ddl_load(st))
+                + ddl_target(st, specs) + [""] + ddl_load(st) + report_comment(st))
     return path
 
 
@@ -1334,7 +1354,8 @@ def scan_logs(log_dir, ext_table, table):
     cols, record, files = {}, 0, []
     if not log_dir or not os.path.isdir(log_dir):
         return cols, record, files
-    pat = re.compile(r"^(" + re.escape(ext_table.lower()) + r"_.*\.log|"
+    # exact ORACLE_LOADER log names (<ext>_%a_%p.log), so EXT_SALES doesn't pick up EXT_SALES_EU's logs
+    pat = re.compile(r"^(" + re.escape(ext_table.lower()) + r"_\d+_\d+\.log|"
                      + re.escape(table.lower()) + r"_stream\.log)$")
     for f in sorted(os.listdir(log_dir)):
         if not pat.match(f):
@@ -1492,7 +1513,7 @@ def run_generate(args):
     base = os.path.splitext(os.path.basename(files[0].path))[0]
     namer = Namer(args.max_name_len)
     table = ident(args.table or namer.name((base,)), "--table")
-    ext_table = ident(args.ext_table or (table + "_EXT")[:args.max_name_len], "--ext-table")
+    ext_table = ident(args.ext_table or ("EXT_" + table)[:args.max_name_len], "--ext-table")
 
     maxes, sampled = {}, False
     if args.sample_size:
@@ -1535,6 +1556,9 @@ def run_generate(args):
           "max_string_size": args.max_string_size, "max_readsize": args.max_readsize,
           "margin": args.margin, "readsize": readsize,
           "files": [f.path for f in files], "total_rows": total_rows}
+    report = io.StringIO()
+    print_inspect(files, columns, DEFAULT_DOPS, False, args.target_size, report)
+    st["inspect_report"] = report.getvalue()
 
     # explicit and log-derived size changes
     found, record_seen = {}, 0
@@ -1752,7 +1776,7 @@ def main(argv=None):
         ap.add_argument("--out-dir", required=True,
                         help="where to write the .pqpart files (OS path of --parts-dir-object)")
         ap.add_argument("--table", help="target table name (default: first file name)")
-        ap.add_argument("--ext-table", help="external table name (default: <table>_EXT)")
+        ap.add_argument("--ext-table", help="external table name (default: EXT_<table>)")
         ap.add_argument("--parts-dir-object", default="PQORA_PARTS",
                         help="directory object of --out-dir (default PQORA_PARTS); the exec and log "
                              "objects default to it, so one object with READ, WRITE, EXECUTE is enough")
@@ -1808,7 +1832,7 @@ def main(argv=None):
         description="pqora {}: Parquet -> Oracle external table preprocessor. Default mode "
                     "inspects Parquet files; see also 'generate', 'resize' and 'verify'.".format(VERSION))
     ap.add_argument("paths", nargs="+", help="Parquet files, globs or directories")
-    ap.add_argument("--dop-list", default="2,4,8,16,32,64")
+    ap.add_argument("--dop-list", default=",".join(str(d) for d in DEFAULT_DOPS))
     ap.add_argument("--list-rowgroups", action="store_true")
     add_common(ap)
     a = ap.parse_args(argv)
