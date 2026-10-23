@@ -57,7 +57,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-VERSION = "1.0"
+VERSION = "1.1"
 PART_MAGIC = "pqora_part"
 PART_FORMAT = 1
 REC_WIDTH = 10                 # RECORDS VARIABLE 10
