@@ -1258,10 +1258,24 @@ def report_comment(st):
     return L
 
 
+def stg_table(st):
+    ext = st["ext_table"]
+    base = ext[4:] if ext.upper().startswith("EXT_") and len(ext) > 4 else st["table"]
+    return base + "_STG"
+
+
+def ddl_ctas(st):
+    """One-line compressed staging copy of the external table."""
+    return ["-- staging copy; run after the external table below exists:",
+            "CREATE TABLE {} COMPRESS FOR QUERY HIGH PARALLEL {} AS SELECT * FROM {};".format(
+                q(stg_table(st)), st["dop"], q(st["ext_table"]))]
+
+
 def write_ddl(st, specs):
     path = ddl_path(st)
-    write_lines(path, ddl_header(st, "Generated") + [""] + ddl_external(st, specs) + [""]
-                + ddl_target(st, specs) + [""] + ddl_load(st) + report_comment(st))
+    write_lines(path, ddl_header(st, "Generated") + [""] + ddl_ctas(st) + [""]
+                + ddl_external(st, specs) + [""] + ddl_target(st, specs) + [""] + ddl_load(st)
+                + report_comment(st))
     return path
 
 

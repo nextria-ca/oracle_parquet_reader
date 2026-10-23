@@ -241,6 +241,8 @@ drop_tables() {
         echo "/"
         echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"${t}\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
         echo "/"
+        echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"${t}_STG\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
+        echo "/"
     done
 }
 drop_tables | run_sql drop_before
@@ -249,7 +251,7 @@ drop_tables | run_sql drop_before
 step "create and load"
 for t in PQK_TYPES PQK_BIG PQK_BLOBS; do
     lt="$(echo "$t" | tr 'A-Z' 'a-z')"
-    run_sql "load_$lt" < "$WORK/parts/$lt.sql"
+    grep -v '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/$lt.sql" | run_sql "load_$lt"
     out="$REP/load_$lt.out"
     loaded="$(grep -E '^ *[0-9]+ +[0-9]+ *$' "$out" | tail -1 | awk '{print $1"/"$2}')"
     el="$(awk '/rows? created\./{f=1} f && /Elapsed/{print $2; exit}' "$out")"
@@ -262,10 +264,19 @@ for t in PQK_TYPES PQK_BIG PQK_BLOBS; do
     fi
 done
 
+# the one-line compressed staging CTAS at the top of <table>.sql
+grep '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/pqk_big.sql" | run_sql ctas_stg
+out="$REP/ctas_stg.out"
+if grep -q 'Table created' "$out"; then
+    result INFO "CTAS PQK_BIG_STG COMPRESS FOR QUERY HIGH: ok (elapsed $(grep Elapsed "$out" | tail -1 | awk '{print $2}'))"
+else
+    result INFO "CTAS PQK_BIG_STG COMPRESS FOR QUERY HIGH not possible here: $(errors "$out" | head -1)"
+fi
+
 # error-test tables: the external tables must exist; their INSERT is expected to fail
 for t in PQK_GAP PQK_ERR; do
     lt="$(echo "$t" | tr 'A-Z' 'a-z')"
-    run_sql "create_$lt" < "$WORK/parts/$lt.sql"
+    grep -v '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/$lt.sql" | run_sql "create_$lt"
 done
 
 # ---------------------------------------------------------------- 8. data checks
