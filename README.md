@@ -60,6 +60,15 @@ the INSERT. `--field-size` and `--auto-field-size-fix` also work on `generate`.
 Sizes above the `VARCHAR2`/`RAW` limit become `CLOB`/`BLOB`, and READSIZE grows
 when needed. `--dry-run` shows the changes only.
 
+### Reading
+
+Each preprocessor process uses `--threads` pyarrow threads (default 8) to
+decode a row group's columns in parallel. Row groups up to `--pre-buffer`
+compressed bytes (default 128 MB) are fetched with large, coalesced, concurrent
+reads (memory about one row group per process), which helps on NFS; larger
+ones are streamed in 8 MB reads. `--pre-buffer 0` always streams. The stream
+log records `mb_per_s` per part, to compare settings.
+
 Oracle runs `pqora.sh <location file>` for each `.pqpart`; with one argument
 that is a part file, `pqora.py` streams that part's rows to stdout. Everything
 the stream needs (Parquet path and size, row groups, column specification,

@@ -48,7 +48,11 @@ import socket
 import sys
 import time
 
-import numpy as np
+# numpy's BLAS would otherwise start one idle thread per CPU in every process
+for _v in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):   # not OMP_*: that sizes pyarrow's pool too
+    os.environ.setdefault(_v, "1")
+
+import numpy as np  # noqa: E402
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -894,24 +898,37 @@ def stream_part(part, out):
     for s in specs:
         if s["source"][0] not in top:
             top.append(s["source"][0])
+    threads = part.get("threads") or 0
+    if threads:
+        pa.set_cpu_count(threads)            # decode threads per process
+        pa.set_io_thread_count(threads)      # concurrent reads when pre-buffering
+    pre_limit = part.get("pre_buffer") or 0
     rows = nbytes = 0
     # after the first oversize value nothing more is written, but the rest of
     # the part is still measured so the error reports every column's real maximum
     problems = {"columns": {}, "record": None}
     for src in part["sources"]:
         check_source(src)
-        pf = pq.ParquetFile(src["path"], buffer_size=8 * MIB, pre_buffer=False)
-        for batch in pf.iter_batches(batch_size=src["batch_rows"], row_groups=src["row_groups"],
-                                     columns=top, use_threads=True):
-            if batch.num_rows == 0:
-                continue
-            rec = encode_batch(batch, specs, part["readsize"], part["lob_max"], problems)
-            if rec is None or problems["columns"] or problems["record"]:
-                continue
-            buf = records_buffer(rec)
-            out.write(buf)
-            rows += batch.num_rows
-            nbytes += len(buf)
+        handles = {}
+        rg_bytes = src.get("rg_bytes") or [None] * len(src["row_groups"])
+        for rg, size in zip(src["row_groups"], rg_bytes):
+            # small enough row groups: read whole column chunks with large coalesced
+            # requests (memory ~ one row group); larger ones: stream in 8 MB reads
+            pre = bool(pre_limit and size is not None and size <= pre_limit)
+            if pre not in handles:
+                handles[pre] = pq.ParquetFile(src["path"], buffer_size=0 if pre else 8 * MIB,
+                                              pre_buffer=pre)
+            for batch in handles[pre].iter_batches(batch_size=src["batch_rows"], row_groups=[rg],
+                                                   columns=top, use_threads=threads != 1):
+                if batch.num_rows == 0:
+                    continue
+                rec = encode_batch(batch, specs, part["readsize"], part["lob_max"], problems)
+                if rec is None or problems["columns"] or problems["record"]:
+                    continue
+                buf = records_buffer(rec)
+                out.write(buf)
+                rows += batch.num_rows
+                nbytes += len(buf)
     if problems["columns"] or problems["record"]:
         raise Oversize(problems)
     if rows != part["rows"]:
@@ -937,12 +954,13 @@ def run_stream(path):
     part = None
     try:
         part = read_part(path)
-        log_line(part, event="start")
+        log_line(part, event="start", threads=part.get("threads"), pre_buffer=part.get("pre_buffer"))
         out = sys.stdout.buffer
         rows, nbytes = stream_part(part, out)
         out.flush()
-        log_line(part, event="end", status="ok", rows=rows, bytes=nbytes,
-                 seconds=round(time.time() - t0, 3))
+        secs = time.time() - t0
+        log_line(part, event="end", status="ok", rows=rows, bytes=nbytes, seconds=round(secs, 3),
+                 mb_per_s=round(nbytes / MIB / max(secs, 1e-6), 1))
         return 0
     except BrokenPipeError:
         # Oracle stopped reading (e.g. ROWNUM limit) - not an error
@@ -1555,6 +1573,7 @@ def run_generate(args):
           "wrapper_name": args.wrapper_name, "dop": args.dop,
           "max_string_size": args.max_string_size, "max_readsize": args.max_readsize,
           "margin": args.margin, "readsize": readsize,
+          "threads": args.threads, "pre_buffer": args.pre_buffer,
           "files": [f.path for f in files], "total_rows": total_rows}
     report = io.StringIO()
     print_inspect(files, columns, DEFAULT_DOPS, False, args.target_size, report)
@@ -1587,10 +1606,11 @@ def run_generate(args):
         for rg in rgs:
             if not sources or sources[-1]["path"] != rg.file:
                 sources.append({"path": rg.file, "size": os.path.getsize(rg.file),
-                                "row_groups": [], "rg_rows": [], "uncompressed": 0})
+                                "row_groups": [], "rg_rows": [], "rg_bytes": [], "uncompressed": 0})
             src = sources[-1]
             src["row_groups"].append(rg.index)
             src["rg_rows"].append(rg.rows)
+            src["rg_bytes"].append(rg.compressed)
             src["uncompressed"] += rg.uncompressed
         for src in sources:
             rows = sum(src["rg_rows"])
@@ -1606,6 +1626,7 @@ def run_generate(args):
             "part": i, "parts": len(parts),
             "rows": rows,
             "readsize": readsize, "lob_max": lob_max,
+            "threads": args.threads, "pre_buffer": args.pre_buffer,
             "log_file": log_file,
             "sources": sources,
             "columns": specs,
@@ -1630,6 +1651,11 @@ def run_generate(args):
                                              "  (unchanged)" if wstate == "same" else ""))
     print("Manifest : {}".format(manifest))
     print("READSIZE : {:,}".format(readsize))
+    all_rgs = [rg for f in files for rg in f.row_groups]
+    n_pre = sum(1 for rg in all_rgs if args.pre_buffer and rg.compressed <= args.pre_buffer)
+    print("Reading  : {} thread(s) per part; pre-buffer {} of {} row group(s) (<= {}), "
+          "stream the rest".format(args.threads, n_pre, len(all_rgs),
+                                   human(args.pre_buffer) if args.pre_buffer else "off"))
     print("Dir objs : " + "; ".join("{} -> {} ({})".format(o, p, pr) for o, p, pr, _ in dir_objects(st)))
     if log_file:
         print("Log file : {}".format(log_file))
@@ -1810,6 +1836,13 @@ def main(argv=None):
                         help="upper limit for READSIZE (default 128MB); the largest record must fit")
         ap.add_argument("--readsize", type=parse_size, help="force READSIZE")
         ap.add_argument("--dop", type=int, default=8, help="PARALLEL degree in the DDL (default 8)")
+        ap.add_argument("--threads", type=int, default=8,
+                        help="pyarrow decode/read threads per preprocessor process (default 8; "
+                             "Oracle already runs one process per part)")
+        ap.add_argument("--pre-buffer", type=parse_size, default=128 * MIB, metavar="SIZE",
+                        help="row groups up to SIZE compressed are read with large coalesced, "
+                             "concurrent requests (memory ~ one row group per process); larger "
+                             "ones are streamed in 8 MB reads (default 128MB, 0 = always stream)")
         add_size_fix(ap)
         a = ap.parse_args(argv[1:])
         return run_generate(a)
