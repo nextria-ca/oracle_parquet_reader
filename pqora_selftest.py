@@ -368,7 +368,9 @@ def table_sources(part_file):
 
 def cmd_expected(a):
     part, srcs = table_sources(a.part)
-    specs = part["columns"]
+    main_specs = part["columns"]
+    # --stage: checksums of <table> UNION ALL <table>_CLOB, described by the _CLOB columns
+    specs = part["stage"]["columns"] if a.stage else main_specs
     acc = {}
     for spec in specs:
         acc[spec["name"]] = {}
@@ -379,8 +381,16 @@ def cmd_expected(a):
             table = pf.read_row_group(rg, columns=top)
             if table.num_rows == 0:
                 continue
-            for spec in specs:
+            small = None
+            if a.stage:
+                mask = pqora.large_mask(pqora.prepare(table, main_specs), main_specs)
+                small = pc.invert(mask) if mask is not None else None
+            for spec, main_spec in zip(specs, main_specs):
                 arr = pqora.column_array(table, spec)
+                if small is not None and main_spec["kind"] in ("text", "raw") and not spec.get("json"):
+                    # rows that stayed in the main table hold '' / empty RAW as NULL
+                    empty = pc.and_(small, pc.equal(pc.binary_length(arr), 0))
+                    arr = pc.if_else(empty, pa.scalar(None, arr.type), arr)
                 for key, v in expected_for(spec, arr).items():
                     cur = acc[spec["name"]].get(key)
                     if key == "max":
@@ -407,7 +417,7 @@ def part_rows(part_file):
 def cmd_sql(a):
     part = pqora.read_part(a.part)
     cols = [("ROWS.cnt", "COUNT(*)")]
-    for spec in part["columns"]:
+    for spec in (part["stage"]["columns"] if a.stage else part["columns"]):
         for key, expr in checks_for(spec):
             cols.append(("{}.{}".format(spec["name"], key), expr))
     print("SELECT 'CHK|' || k || '|' || v FROM (")
@@ -423,6 +433,26 @@ def cmd_sql(a):
     for i, (key, _) in enumerate(cols):
         print("    c{} AS '{}'{}".format(i, key.replace("'", "''"), "," if i < len(cols) - 1 else ""))
     print("));")
+
+
+def cmd_stageview(a):
+    """CREATE VIEW over <table> UNION ALL <table>_CLOB with LOB columns throughout."""
+    part = pqora.read_part(a.part)
+    main, stage = part["columns"], part["stage"]
+    sel_main, sel_clob = [], []
+    for m, c in zip(main, stage["columns"]):
+        n = '"' + m["name"] + '"'
+        if m["kind"] == "text" and c["kind"] == "clob":
+            sel_main.append("TO_CLOB({}) AS {}".format(n, n))
+        elif m["kind"] == "raw" and c["kind"] == "blob":
+            sel_main.append("TO_BLOB({}) AS {}".format(n, n))
+        else:
+            sel_main.append(n)
+        sel_clob.append(n)
+    print('CREATE OR REPLACE VIEW "{}" AS'.format(a.view.upper()))
+    print('SELECT {} FROM "{}"'.format(", ".join(sel_main), part["table"]))
+    print("UNION ALL")
+    print('SELECT {} FROM "{}";'.format(", ".join(sel_clob), stage["table"]))
 
 
 def parse_spool(path):
@@ -442,9 +472,12 @@ def same(exp, got):
     if got in ("", None):
         return exp in ("0", "None", "")
     try:
-        return decimal.Decimal(exp) == decimal.Decimal(got)
+        e, g = decimal.Decimal(exp), decimal.Decimal(got)
     except (decimal.InvalidOperation, ValueError):
         return False
+    # Oracle NUMBER keeps 38 significant digits: sums of 38-digit decimals are
+    # rounded there, differently depending on the order rows are added
+    return e == g or abs(e - g) <= abs(e) * decimal.Decimal("1e-36")
 
 
 def cmd_compare(a):
@@ -510,10 +543,15 @@ def main():
     m.add_argument("--blob-mb", default="1,10,50,100")
     e = sub.add_parser("expected")
     e.add_argument("part")
+    e.add_argument("--stage", action="store_true", help="for <table> UNION ALL <table>_CLOB")
     s = sub.add_parser("sql")
     s.add_argument("part")
     s.add_argument("table")
     s.add_argument("--dop", type=int, default=0)
+    s.add_argument("--stage", action="store_true", help="checks with the _CLOB table's columns")
+    v = sub.add_parser("stageview")
+    v.add_argument("part")
+    v.add_argument("view")
     c = sub.add_parser("compare")
     c.add_argument("expected")
     c.add_argument("spool")
@@ -535,6 +573,8 @@ def main():
         return cmd_expected(a) or 0
     if a.cmd == "sql":
         return cmd_sql(a) or 0
+    if a.cmd == "stageview":
+        return cmd_stageview(a) or 0
     if a.cmd == "compare":
         return cmd_compare(a)
     if a.cmd == "parallel":

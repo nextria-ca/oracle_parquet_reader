@@ -918,19 +918,40 @@ def column_array(batch, spec):
     return arr
 
 
-def encode_batch(batch, specs, readsize, lob_max, problems):
-    """Returns a binary array with one complete record per row, or None if a
-    value or record is larger than declared (recorded in problems)."""
-    fields = []
+def prepare(batch, specs):
+    """Convert every column once: fixed-width binary for dates/timestamps, text or
+    binary arrays (nulls kept) for everything else. Aligned with specs."""
+    prep = []
     for spec in specs:
         arr = column_array(batch, spec)
+        if spec["kind"] in ("timestamp", "date"):
+            prep.append(fixed_text(arr, spec))
+        else:
+            prep.append(to_text(arr, spec))
+    return prep
+
+
+def large_mask(prep, specs):
+    """Rows with a value larger than its (non-LOB) column allows, or None."""
+    mask = None
+    for spec, a in zip(specs, prep):
+        if spec["kind"] in ("text", "raw") and "max" in spec:
+            big = pc.greater(pc.fill_null(pc.binary_length(a), 0), spec["max"])
+            mask = big if mask is None else pc.or_(mask, big)
+    return mask
+
+
+def assemble(prep, specs, readsize, lob_max, problems):
+    """Records (binary array, one per row) from prepared columns, or None if a
+    value or record is larger than declared (recorded in problems)."""
+    fields = []
+    for spec, a in zip(specs, prep):
         k = spec["kind"]
         if k in ("timestamp", "date"):
-            fields.append(fixed_text(arr, spec))
+            fields.append(a)
             continue
         width, max_bytes = field_layout(spec, lob_max)
-        text = to_text(arr, spec)
-        lens = pc.fill_null(pc.binary_length(text), 0)
+        lens = pc.fill_null(pc.binary_length(a), 0)
         m = pc.max(lens).as_py() or 0
         if m > max_bytes:
             seen = problems["columns"].get(spec["name"], (0, max_bytes))[0]
@@ -938,8 +959,8 @@ def encode_batch(batch, specs, readsize, lob_max, problems):
         if problems["columns"]:
             continue        # only measuring from now on
         if k in ("clob", "blob"):
-            fields.append(pc.if_else(pc.is_null(text), B_N, B_V))
-        fields.append(length_prefixed(text, width, lens))
+            fields.append(pc.if_else(pc.is_null(a), B_N, B_V))
+        fields.append(length_prefixed(a, width, lens))
     if problems["columns"]:
         return None
     body = pc.binary_join_element_wise(*(fields + [b""]))
@@ -952,6 +973,10 @@ def encode_batch(batch, specs, readsize, lob_max, problems):
         return None
     prefix = as_binary(pc.utf8_lpad(pc.cast(rec_lens, pa.string()), width=REC_WIDTH, padding="0"))
     return pc.binary_join_element_wise(prefix, body, b"")
+
+
+def encode_batch(batch, specs, readsize, lob_max, problems):
+    return assemble(prepare(batch, specs), specs, readsize, lob_max, problems)
 
 
 def records_buffer(rec):
@@ -986,8 +1011,13 @@ def check_source(src):
                 path, rg, rows))
 
 
-def stream_part(part, out):
-    """Write all records of a part to out (binary). Returns (rows, bytes)."""
+def stream_part(part, out, stage_out=None):
+    """Write all records of a part to out (binary). With --stage-large-records,
+    records with a value too large for the main table go to stage_out instead,
+    in the _CLOB table's format. Returns (rows, bytes, large rows)."""
+    stage = part.get("stage")
+    stage_problems = {"columns": {}, "record": None}
+    large = 0
     specs = part["columns"]
     top = []
     for s in specs:
@@ -1017,18 +1047,36 @@ def stream_part(part, out):
                                                    columns=top, use_threads=threads != 1):
                 if batch.num_rows == 0:
                     continue
-                rec = encode_batch(batch, specs, part["readsize"], part["lob_max"], problems)
+                prep = prepare(batch, specs)
+                if stage:
+                    mask = large_mask(prep, specs)
+                    n_large = (pc.sum(mask).as_py() or 0) if mask is not None else 0
+                    if n_large:
+                        big = assemble([pc.filter(a, mask) for a in prep], stage["columns"],
+                                       stage["readsize"], stage["lob_max"], stage_problems)
+                        if stage_problems["columns"] or stage_problems["record"]:
+                            raise StreamError("large record does not fit the {} table: {}".format(
+                                stage["table"], Oversize(stage_problems).args[0].split(" (fix")[0]))
+                        if stage_out is not None:
+                            stage_out.write(records_buffer(big))
+                        large += n_large
+                        keep = pc.invert(mask)
+                        prep = [pc.filter(a, keep) for a in prep]
+                        if batch.num_rows == n_large:
+                            continue
+                rec = assemble(prep, specs, part["readsize"], part["lob_max"], problems)
                 if rec is None or problems["columns"] or problems["record"]:
                     continue
                 buf = records_buffer(rec)
                 out.write(buf)
-                rows += batch.num_rows
+                rows += len(rec)
                 nbytes += len(buf)
     if problems["columns"] or problems["record"]:
         raise Oversize(problems)
-    if rows != part["rows"]:
-        raise StreamError("wrote {} rows but the part expects {}".format(rows, part["rows"]))
-    return rows, nbytes
+    if rows + large != part["rows"]:
+        raise StreamError("wrote {} rows (+{} large) but the part expects {}".format(
+            rows, large, part["rows"]))
+    return rows, nbytes, large
 
 
 def log_line(part, **kw):
@@ -1044,21 +1092,43 @@ def log_line(part, **kw):
         pass
 
 
+def discard(fh, path):
+    try:
+        if fh:
+            fh.close()
+        if path:
+            os.remove(path)
+    except OSError:
+        pass
+
+
 def run_stream(path):
     t0 = time.time()
     part = None
+    stage_fh = stage_tmp = None
     try:
         part = read_part(path)
         log_line(part, event="start", threads=part.get("threads"), pre_buffer=part.get("pre_buffer"))
         out = sys.stdout.buffer
-        rows, nbytes = stream_part(part, out)
+        stage = part.get("stage")
+        if stage:
+            # written under a temporary name, renamed only when the part completed
+            stage_tmp = "{}.tmp.{}".format(stage["file"], os.getpid())
+            stage_fh = open(stage_tmp, "wb")
+        rows, nbytes, large = stream_part(part, out, stage_fh)
         out.flush()
+        if stage_fh:
+            stage_fh.close()
+            os.rename(stage_tmp, stage["file"])
+            stage_fh = stage_tmp = None
         secs = time.time() - t0
         log_line(part, event="end", status="ok", rows=rows, bytes=nbytes, seconds=round(secs, 3),
-                 mb_per_s=round(nbytes / MIB / max(secs, 1e-6), 1))
+                 mb_per_s=round(nbytes / MIB / max(secs, 1e-6), 1), **({"large_rows": large} if stage else {}))
         return 0
     except BrokenPipeError:
-        # Oracle stopped reading (e.g. ROWNUM limit) - not an error
+        # Oracle stopped reading (e.g. ROWNUM limit) - not an error; the large
+        # record file is incomplete, so the previous one is kept
+        discard(stage_fh, stage_tmp)
         if part:
             log_line(part, event="end", status="reader closed pipe", seconds=round(time.time() - t0, 3))
         try:
@@ -1067,6 +1137,7 @@ def run_stream(path):
             pass
         return 0
     except Exception as e:
+        discard(stage_fh, stage_tmp)
         msg = "pqora {}: {}: {}".format(VERSION, os.path.basename(path), e)
         if not isinstance(e, (StreamError, OSError)):
             msg = "pqora {}: {}: {}: {}".format(VERSION, os.path.basename(path), type(e).__name__, e)
@@ -1157,10 +1228,14 @@ def run_verify(paths):
     for path in paths:
         part = read_part(path)
         dec = Decoder(part)
+        stage = part.get("stage")
+        sdec = Decoder({"columns": stage["columns"], "lob_max": stage["lob_max"]}) if stage else None
         t0 = time.time()
         try:
-            rows, _ = stream_part(part, dec)
+            rows, _, large = stream_part(part, dec, sdec)
             dec.close()
+            if sdec:
+                sdec.close()
         except StreamError as e:
             print("{}: FAILED: {}".format(path, e))
             rc = 1
@@ -1168,6 +1243,9 @@ def run_verify(paths):
         print("{}: OK  rows={:,} bytes={:,} max_record={:,} (READSIZE {:,})  {:.1f}s".format(
             os.path.basename(path), dec.rows, dec.bytes, dec.max_record, part["readsize"],
             time.time() - t0))
+        if sdec:
+            print("    large records for {}: {:,} rows, {:,} bytes, max_record={:,} (READSIZE {:,})".format(
+                stage["table"], sdec.rows, sdec.bytes, sdec.max_record, stage["readsize"]))
         for s, nn, ml in zip(part["columns"], dec.nulls, dec.max_len):
             print("    {:<32} {:<10} nulls={:<10,} max_len={:,}".format(
                 short(s["name"], 32), s["kind"], nn, ml))
@@ -1285,7 +1363,7 @@ def ddl_header(st, title):
     return L
 
 
-def ddl_external(st, specs):
+def ddl_external(st, specs, preprocessor=True):
     ext = st["ext_table"]
     L = ["CREATE TABLE {} (".format(q(ext))]
     L.extend(column_lines(specs))
@@ -1296,9 +1374,10 @@ def ddl_external(st, specs):
           "  ACCESS PARAMETERS (",
           "    RECORDS VARIABLE {}".format(REC_WIDTH),
           "    CHARACTERSET AL32UTF8",
-          "    STRING SIZES ARE IN BYTES",
-          "    PREPROCESSOR {}:'{}'".format(st["exec_dir_object"], st["wrapper_name"]),
-          "    READSIZE {}".format(st["readsize"])]
+          "    STRING SIZES ARE IN BYTES"]
+    if preprocessor:
+        L.append("    PREPROCESSOR {}:'{}'".format(st["exec_dir_object"], st["wrapper_name"]))
+    L += ["    READSIZE {}".format(st["readsize"])]
     if st.get("log_dir_object"):
         L.append("    BADFILE {}:'{}_%a_%p.bad'".format(st["log_dir_object"], ext.lower()))
         L.append("    LOGFILE {}:'{}_%a_%p.log'".format(st["log_dir_object"], ext.lower()))
@@ -1321,15 +1400,28 @@ def ddl_target(st, specs):
 
 def ddl_load(st):
     tgt, ext, dop = q(st["table"]), q(st["ext_table"]), st["dop"]
-    return ["ALTER SESSION ENABLE PARALLEL DML;",
-            "",
-            "INSERT /*+ APPEND PARALLEL({}) */ INTO {}".format(dop, tgt),
-            "SELECT /*+ PARALLEL({}) */ * FROM {};".format(dop, ext),
-            "",
-            "COMMIT;",
-            "",
-            "-- expected row count: {}".format(st["total_rows"]),
-            "SELECT COUNT(*) AS loaded_rows, {} AS expected_rows FROM {};".format(st["total_rows"], tgt)]
+    L = ["ALTER SESSION ENABLE PARALLEL DML;",
+         "",
+         "INSERT /*+ APPEND PARALLEL({}) */ INTO {}".format(dop, tgt),
+         "SELECT /*+ PARALLEL({}) */ * FROM {};".format(dop, ext),
+         "",
+         "COMMIT;",
+         ""]
+    stage = st.get("stage")
+    if stage:
+        L += ["-- large records, written while {} was read above".format(ext),
+              "INSERT /*+ APPEND PARALLEL({}) */ INTO {}".format(dop, q(stage["table"])),
+              "SELECT /*+ PARALLEL({}) */ * FROM {};".format(dop, q(stage["ext_table"])),
+              "",
+              "COMMIT;",
+              "",
+              "-- expected row count: {} ({} + {})".format(st["total_rows"], st["table"], stage["table"]),
+              "SELECT (SELECT COUNT(*) FROM {}) AS loaded_rows, (SELECT COUNT(*) FROM {}) AS large_rows, "
+              "{} AS expected_rows FROM dual;".format(tgt, q(stage["table"]), st["total_rows"])]
+    else:
+        L += ["-- expected row count: {}".format(st["total_rows"]),
+              "SELECT COUNT(*) AS loaded_rows, {} AS expected_rows FROM {};".format(st["total_rows"], tgt)]
+    return L
 
 
 def write_lines(path, lines):
@@ -1361,19 +1453,42 @@ def stg_table(st):
 
 def ddl_ctas(st):
     """One-line compressed staging copy of the external table."""
-    return ["-- suspend instead of failing on space errors (needs the RESUMABLE privilege):",
-            "ALTER SESSION ENABLE RESUMABLE TIMEOUT 3600 NAME {};".format(sql_str("pqora " + st["table"])),
-            "",
-            "-- staging copy; run after the external table below exists:",
-            "CREATE TABLE {} COMPRESS FOR QUERY HIGH PARALLEL {} AS SELECT * FROM {};".format(
-                q(stg_table(st)), st["dop"], q(st["ext_table"]))]
+    L = ["-- suspend instead of failing on space errors (needs the RESUMABLE privilege):",
+         "ALTER SESSION ENABLE RESUMABLE TIMEOUT 3600 NAME {};".format(sql_str("pqora " + st["table"])),
+         "",
+         "-- staging copy; run after the external table below exists:",
+         "CREATE TABLE {} COMPRESS FOR QUERY HIGH PARALLEL {} AS SELECT * FROM {};".format(
+             q(stg_table(st)), st["dop"], q(st["ext_table"]))]
+    stage = st.get("stage")
+    if stage:
+        L += ["-- large records; run after {} was read completely (e.g. by the line above):".format(
+                  st["ext_table"]),
+              "CREATE TABLE {} COMPRESS FOR QUERY HIGH PARALLEL {} AS SELECT * FROM {};".format(
+                  q(stage["table"] + "_STG"), st["dop"], q(stage["ext_table"]))]
+    return L
+
+
+def ddl_stage_external(st):
+    """External table over the large-record files (no preprocessor)."""
+    stage = st["stage"]
+    st2 = dict(st, ext_table=stage["ext_table"], readsize=stage["readsize"], lob_max=stage["lob_max"],
+               location=stage["location"], parts_dir_object=st["log_dir_object"])
+    return ["-- Records with a value too large for {} (written by its preprocessor while it is".format(
+                st["ext_table"]),
+            "-- read). Complete only after a full read of {}.".format(st["ext_table"])] \
+        + ddl_external(st2, stage["columns"], preprocessor=False)
 
 
 def write_ddl(st, specs):
     path = ddl_path(st)
-    write_lines(path, ddl_header(st, "Generated") + [""] + ddl_ctas(st) + [""]
-                + ddl_external(st, specs) + [""] + ddl_target(st, specs) + [""] + ddl_load(st)
-                + report_comment(st))
+    L = ddl_header(st, "Generated") + [""] + ddl_ctas(st) + [""] + ddl_external(st, specs) + [""]
+    stage = st.get("stage")
+    if stage:
+        L += ddl_stage_external(st) + [""]
+    L += ddl_target(st, specs) + [""]
+    if stage:
+        L += ddl_target(dict(st, table=stage["table"]), stage["columns"]) + [""]
+    write_lines(path, L + ddl_load(st) + report_comment(st))
     return path
 
 
@@ -1527,7 +1642,11 @@ def apply_size_changes(specs, manual, found, st):
             if size != "lob":
                 lob_hints[spec["name"]] = max(lob_hints.get(spec["name"], 0), size)
             return None
-        if size == "lob" or size > limit:
+        if st.get("stage") and (size == "lob" or size > limit):
+            if spec["max"] == limit:
+                return None
+            spec["max"] = limit             # larger values go to the _CLOB table
+        elif size == "lob" or size > limit:
             to_lob(spec)
             if size != "lob":
                 lob_hints[spec["name"]] = size
@@ -1590,6 +1709,44 @@ def grow_readsize(st, specs, lob_hints, record_seen):
 # ---------------------------------------------------------------------------
 # generate / resize
 # ---------------------------------------------------------------------------
+
+def stage_main_specs(specs, max_string_size, clob_table):
+    """--stage-large-records: no LOB columns in the main table; CLOB/BLOB columns
+    become VARCHAR2/RAW at the limit and larger values go to the _CLOB table."""
+    var_limit, raw_limit = size_limits(max_string_size)
+    for s in specs:
+        if s["kind"] == "clob":
+            s.update(kind="text", max=var_limit, otype="VARCHAR2({} BYTE)".format(var_limit))
+        elif s["kind"] == "blob":
+            s.update(kind="raw", max=raw_limit, otype="RAW({})".format(raw_limit))
+        else:
+            continue
+        s["note"] = (s.get("note") or "") + "; larger values -> " + clob_table
+
+
+def stage_settings(st, specs, maxes, args):
+    """Columns and READSIZE of the _CLOB table: every text column a CLOB and
+    every binary column a BLOB, so any diverted record fits."""
+    cols = []
+    for s in specs:
+        c = dict(s)
+        c["note"] = (c.get("note") or "").replace("; larger values -> " + st["table"] + "_CLOB", "")
+        if c["kind"] in ("text", "raw"):
+            c.pop("max", None)
+            c["kind"] = "clob" if c["kind"] == "text" else "blob"
+            c["otype"] = c["kind"].upper()
+        cols.append(c)
+    cap = args.max_readsize
+    if maxes is not None:
+        need = REC_WIDTH + sum(field_max_bytes(c, 0) for c in cols if c["kind"] not in ("clob", "blob"))
+        need += sum(1 + LOB_WIDTH + maxes.get(tuple(c["source"]), 0) for c in cols
+                    if c["kind"] in ("clob", "blob"))
+        readsize = min(cap, max(MIB, pow2_ceil(need * 2)))
+    else:
+        readsize = cap
+    return {"table": st["table"] + "_CLOB", "ext_table": st["ext_table"] + "_CLOB",
+            "readsize": readsize, "lob_max": readsize - REC_WIDTH - 1 - LOB_WIDTH, "columns": cols}
+
 
 def run_generate(args):
     paths = expand_inputs(args.paths)
@@ -1663,6 +1820,11 @@ def run_generate(args):
             column_avg[key] = column_avg.get(key, 0) + c["uncompressed"] / float(max(1, total_rows))
 
     specs = build_specs(schema, args, maxes, sampled, column_avg, bands)
+    if args.stage_large_records:
+        if not log_dir or not log_obj:
+            sys.exit("ERROR: --stage-large-records writes the large records into the log directory; "
+                     "it needs --log-dir and --log-dir-object")
+        stage_main_specs(specs, args.max_string_size, table + "_CLOB")
 
     # READSIZE: must hold the largest record (prefix included)
     has_lob = any(s["kind"] in ("clob", "blob") for s in specs)
@@ -1702,6 +1864,8 @@ def run_generate(args):
         st["readsize"] = readsize = grow_readsize(st, specs, lob_hints, record_seen) \
             if not args.readsize else args.readsize
     lob_max = st["lob_max"] = readsize - REC_WIDTH - 1 - LOB_WIDTH
+    if args.stage_large_records:
+        st["stage"] = stage_settings(st, specs, maxes if sampled else None, args)
     if est and est > readsize:
         warn("estimated maximum record size {:,} exceeds READSIZE {:,}; rows that large will "
              "fail the load".format(est, readsize))
@@ -1713,6 +1877,9 @@ def run_generate(args):
     for old in table_part_files(out_dir, table):
         os.remove(old)
     part_entries = []
+    if st.get("stage"):
+        st["stage"]["location"] = ["{}_clob_{:0{w}d}.dat".format(table.lower(), i, w=width)
+                                   for i in range(1, len(parts) + 1)]
     for i, rgs in enumerate(parts, 1):
         name = "{}_{:0{w}d}.pqpart".format(table.lower(), i, w=width)
         sources = []
@@ -1744,6 +1911,11 @@ def run_generate(args):
             "sources": sources,
             "columns": specs,
         }
+        if st.get("stage"):
+            stg = st["stage"]
+            part["stage"] = {"table": stg["table"], "readsize": stg["readsize"], "lob_max": stg["lob_max"],
+                             "file": os.path.join(log_dir, stg["location"][i - 1]),
+                             "columns": stg["columns"]}
         with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
             json.dump(part, fh, indent=1)
         part_entries.append((name, rows, sum(rg.uncompressed for rg in rgs)))
@@ -1774,6 +1946,11 @@ def run_generate(args):
         print("Log file : {}".format(log_file))
     for c in changes:
         print("Resized  : " + c)
+    if st.get("stage"):
+        print("Large    : records with a value above the main column sizes go to {} via {} "
+              "(files {}_clob_*.dat in {}, READSIZE {:,})".format(
+                  st["stage"]["table"], st["stage"]["ext_table"], table.lower(), log_dir,
+                  st["stage"]["readsize"]))
     if not sampled and any(s["kind"] == "text" for s in specs):
         print("Note     : VARCHAR2 sizes are defaults; use --sample-size (or 'all') to size them "
               "from the data.")
@@ -1951,6 +2128,11 @@ def main(argv=None):
                         help="upper limit for READSIZE (default 128MB); the largest record must fit")
         ap.add_argument("--readsize", type=parse_size, help="force READSIZE")
         ap.add_argument("--dop", type=int, default=8, help="PARALLEL degree in the DDL (default 8)")
+        ap.add_argument("--stage-large-records", action="store_true",
+                        help="keep LOBs out of the main external table: records with any value larger "
+                             "than its VARCHAR2/RAW column are written to files in the log directory "
+                             "instead and loaded through a second external table EXT_<table>_CLOB into "
+                             "<table>_CLOB (CLOB/BLOB columns)")
         ap.add_argument("--threads", type=int, default=8,
                         help="pyarrow decode/read threads per preprocessor process (default 8; "
                              "Oracle already runs one process per part)")

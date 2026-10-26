@@ -33,7 +33,7 @@ SQL_TIMEOUT="${SQL_TIMEOUT:-1800}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 REP="$WORK/report"
 SUMMARY="$REP/summary.txt"
-TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_ERR"
+TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_ERR PQK_STAGE PQK_STAGE_CLOB"
 
 mkdir -p "$WORK"/{data,parts,exec,log,sql} "$REP" || exit 1
 chmod 755 "$WORK" "$WORK"/data "$WORK"/parts "$WORK"/exec
@@ -161,6 +161,11 @@ for spec in "PQK_TYPES types.parquet" "PQK_BIG big.parquet" "PQK_BLOBS blobs.par
     set -- $spec
     if gen "$1" "$2" --dop 8; then result PASS "generate $1"; else result FAIL "generate $1 (see generate.out)"; fi
 done
+if gen PQK_STAGE types.parquet --dop 4 --stage-large-records; then
+    result PASS "generate PQK_STAGE (--stage-large-records)"
+else
+    result FAIL "generate PQK_STAGE --stage-large-records (see generate.out)"
+fi
 # PQK_ERR: make every part claim a different file size -> stream mode must refuse
 "$PY" - "$WORK/parts" <<'EOF' >> "$REP/generate.out" 2>&1
 import glob, json, os, sys
@@ -176,7 +181,7 @@ cat "$WORK/exec/pqora.sh" >> "$REP/generate.out"
 # ---------------------------------------------------------------- 5. offline checks
 step "offline verify"
 if "$PY" "$KIT/pqora.py" verify "$WORK"/parts/pqk_types_*.pqpart "$WORK"/parts/pqk_big_*.pqpart \
-        "$WORK"/parts/pqk_blobs_*.pqpart > "$REP/verify.out" 2>&1; then
+        "$WORK"/parts/pqk_blobs_*.pqpart "$WORK"/parts/pqk_stage_*.pqpart > "$REP/verify.out" 2>&1; then
     result PASS "verify: framing of all parts ($(grep -c ': OK' "$REP/verify.out") parts)"
 else
     result FAIL "verify (see verify.out)"
@@ -264,6 +269,19 @@ for t in PQK_TYPES PQK_BIG PQK_BLOBS; do
     fi
 done
 
+# --stage-large-records: main table without LOBs + large records via EXT_PQK_STAGE_CLOB
+grep -v -e '_STG" COMPRESS FOR QUERY HIGH' -e 'ENABLE RESUMABLE' "$WORK/parts/pqk_stage.sql" | run_sql load_pqk_stage
+out="$REP/load_pqk_stage.out"
+counts="$(grep -E '^ *[0-9]+ +[0-9]+ +[0-9]+ *$' "$out" | tail -1)"
+set -- $counts
+if errors "$out" >/dev/null; then
+    result FAIL "create+load PQK_STAGE: $(errors "$out" | head -1)"
+elif [ -n "$counts" ] && [ $(( $1 + $2 )) = "$3" ] && [ "$2" -gt 0 ]; then
+    result PASS "create+load PQK_STAGE: $1 rows + $2 large rows in PQK_STAGE_CLOB = $3"
+else
+    result FAIL "create+load PQK_STAGE: main/large/expected = '${counts:-?}' (see load_pqk_stage.out)"
+fi
+
 # the one-line compressed staging CTAS at the top of <table>.sql
 grep '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/pqk_big.sql" | run_sql ctas_stg
 out="$REP/ctas_stg.out"
@@ -310,6 +328,18 @@ check types_ext_nls PQK_TYPES EXT_PQK_TYPES 4 \
     "ALTER SESSION SET NLS_DATE_FORMAT = 'DD.MM.RR';" \
     "ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'DD.MM.RR HH24.MI.SSXFF';" \
     "ALTER SESSION SET NLS_TERRITORY = 'GERMANY';"
+
+# staged table: PQK_STAGE UNION ALL PQK_STAGE_CLOB must equal the source exactly
+SP="$(ls "$WORK"/parts/pqk_stage_*.pqpart | head -1)"
+"$PY" "$KIT/pqora_selftest.py" stageview "$SP" PQK_STAGE_ALL | run_sql stage_view
+"$PY" "$KIT/pqora_selftest.py" expected --stage "$SP" > "$REP/PQK_STAGE.expected.json" 2>> "$REP/selftest.err"
+"$PY" "$KIT/pqora_selftest.py" sql --stage "$SP" PQK_STAGE_ALL --dop 4 | run_sql check_stage_all
+if "$PY" "$KIT/pqora_selftest.py" compare "$REP/PQK_STAGE.expected.json" "$REP/check_stage_all.out" \
+        --label stage_main+clob > "$REP/compare_stage_all.txt" 2>&1; then
+    result PASS "$(tail -1 "$REP/compare_stage_all.txt" | cut -c7-)"
+else
+    result FAIL "$(tail -1 "$REP/compare_stage_all.txt" | cut -c7-)  (see compare_stage_all.txt)"
+fi
 
 # ---------------------------------------------------------------- 9. parallelism
 step "parallelism"
@@ -370,7 +400,8 @@ fi
 
 # ---------------------------------------------------------------- 11. cleanup
 if [ "$KEEP" != "1" ]; then
-    drop_tables | run_sql drop_after
+    { drop_tables; echo "BEGIN EXECUTE IMMEDIATE 'DROP VIEW \"PQK_STAGE_ALL\"'; EXCEPTION WHEN OTHERS THEN NULL; END;"; echo "/"; } \
+        | run_sql drop_after
 fi
 FAILS=$(grep -c '^FAIL' "$SUMMARY")
 say ""

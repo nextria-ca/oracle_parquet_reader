@@ -60,6 +60,18 @@ the INSERT. `--field-size` and `--auto-field-size-fix` also work on `generate`.
 Sizes above the `VARCHAR2`/`RAW` limit become `CLOB`/`BLOB`, and READSIZE grows
 when needed. `--dry-run` shows the changes only.
 
+### Large records (`--stage-large-records`)
+
+A single CLOB column in the external table slows the whole load down. With
+`--stage-large-records` the main external table `EXT_<table>` has no LOB
+columns (would-be CLOB/BLOB columns become `VARCHAR2`/`RAW` at the limit), and
+every record with a value larger than its column is written - instead of being
+loaded - to `<table>_clob_NNNN.dat` in the log directory. A second external
+table `EXT_<table>_CLOB` (all string columns CLOB, binary BLOB, no
+preprocessor) reads those files into `<table>_CLOB`. `<table>.sql` contains
+both; `EXT_<table>_CLOB` is complete only after `EXT_<table>` has been read in
+full (interrupted reads keep the previous files).
+
 ### Reading
 
 Each preprocessor process uses `--threads` pyarrow threads (default 8) to
