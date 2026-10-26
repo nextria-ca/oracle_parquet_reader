@@ -509,52 +509,70 @@ def to_json_array(arr):
 # sampling
 # ---------------------------------------------------------------------------
 
-def _max_len(arr):
-    lens = pc.binary_length(arr)
-    m = pc.max(lens).as_py()
-    return m or 0
+# Oracle size boundaries reported per sampled column: (standard limit, extended limit)
+TEXT_BANDS = (4000, 32767)      # VARCHAR2 / extended VARCHAR2 / beyond: CLOB
+RAW_BANDS = (2000, 32767)       # RAW / extended RAW / beyond: BLOB
 
 
-def measure(arr, path, maxes):
+def _len_stats(arr, bands):
+    """(max byte length, [count <= bands[0], count <= bands[1], count above])
+    over the non-null values."""
+    v = pc.fill_null(pc.binary_length(arr), -1).to_numpy(zero_copy_only=False)
+    v = v[v >= 0]
+    if not len(v):
+        return 0, [0, 0, 0]
+    lo, hi = bands
+    return int(v.max()), [int((v <= lo).sum()), int(((v > lo) & (v <= hi)).sum()), int((v > hi).sum())]
+
+
+def _record(path, stats, maxes, bands):
+    m, counts = stats
+    maxes[path] = max(maxes.get(path, 0), m)
+    acc = bands.setdefault(path, [0, 0, 0])
+    for i, c in enumerate(counts):
+        acc[i] += c
+
+
+def measure(arr, path, maxes, bands):
     arr = plain(arr)
     t = arr.type
     if pa.types.is_struct(t):
         for i in range(t.num_fields):
-            measure(struct_child(arr, t[i].name), path + (t[i].name,), maxes)
+            measure(struct_child(arr, t[i].name), path + (t[i].name,), maxes, bands)
     elif is_json_type(t):
-        maxes[path] = max(maxes.get(path, 0), _max_len(to_json_array(arr)))
+        _record(path, _len_stats(to_json_array(arr), TEXT_BANDS), maxes, bands)
     elif is_text(t) or is_binary(t):
         if _is("is_large_string", t):
             arr = pc.cast(arr, pa.string())
         elif _is("is_large_binary", t):
             arr = pc.cast(arr, pa.binary())
-        maxes[path] = max(maxes.get(path, 0), _max_len(arr))
+        _record(path, _len_stats(arr, RAW_BANDS if is_binary(t) else TEXT_BANDS), maxes, bands)
 
 
 def sample_row_group(rg, cols, batch_rows, budget, pre_limit):
     """Measure one row group (up to `budget` bytes); own file handle, so it can
-    run in a worker thread. Returns ({path: max bytes}, rows)."""
-    maxes, rows, read = {}, 0, 0
+    run in a worker thread. Returns ({path: max bytes}, {path: band counts}, rows)."""
+    maxes, bands, rows, read = {}, {}, 0, 0
     pre = bool(pre_limit and rg.compressed <= pre_limit)
     pf = pq.ParquetFile(rg.file, buffer_size=0 if pre else 8 * MIB, pre_buffer=pre)
     for batch in pf.iter_batches(batch_size=batch_rows, row_groups=[rg.index], columns=cols):
         for name in cols:
-            measure(batch.column(batch.schema.get_field_index(name)), (name,), maxes)
+            measure(batch.column(batch.schema.get_field_index(name)), (name,), maxes, bands)
         rows += batch.num_rows
         read += batch.nbytes
         if read >= budget:
             break
-    return maxes, rows
+    return maxes, bands, rows
 
 
 def sample(files, schema, budget, columns, workers=1, pre_limit=0):
     """Read up to `budget` bytes spread evenly across all row groups (only the
     columns that need size estimation), `workers` row groups at a time.
-    Returns ({path: max bytes}, rows)."""
+    Returns ({path: max bytes}, rows, {path: [count per Oracle size band]})."""
     cols = [f.name for f in schema if needs_sampling(f.type)]
-    maxes = {}
+    maxes, bands = {}, {}
     if not cols:
-        return maxes, 0
+        return maxes, 0, bands
     rgs = [rg for f in files for rg in f.row_groups]
     total = sum(rg.uncompressed for rg in rgs)
     if budget >= total:
@@ -573,15 +591,19 @@ def sample(files, schema, budget, columns, workers=1, pre_limit=0):
         futures = [pool.submit(sample_row_group, rg, cols, batch_rows, per_rg, pre_limit)
                    for rg in chosen]
         for fut in concurrent.futures.as_completed(futures):
-            part_max, part_rows = fut.result()
+            part_max, part_bands, part_rows = fut.result()
             for k, v in part_max.items():
                 maxes[k] = max(maxes.get(k, 0), v)
+            for k, counts in part_bands.items():
+                acc = bands.setdefault(k, [0, 0, 0])
+                for i, c in enumerate(counts):
+                    acc[i] += c
             rows += part_rows
             done += 1
             if done == len(chosen) or done % max(1, len(chosen) // 20) == 0:
                 sys.stderr.write("  sampled {}/{} row groups ({:,} rows, {:.0f}s)\n".format(
                     done, len(chosen), rows, time.time() - t0))
-    return maxes, rows
+    return maxes, rows, bands
 
 
 # ---------------------------------------------------------------------------
@@ -654,21 +676,30 @@ def scalar_spec(t, u):
     return None
 
 
-def build_specs(schema, args, maxes, sampled, column_avg):
+def band_note(counts, bands):
+    lo, hi = bands
+    return "; <={} B: {:,}, {}-{} B: {:,}, >{} B: {:,}".format(
+        lo, counts[0], lo + 1, hi, counts[1], hi, counts[2])
+
+
+def build_specs(schema, args, maxes, sampled, column_avg, bands=None):
     """Flatten the schema into a list of column specs (dicts)."""
     namer = Namer(args.max_name_len)
     var_limit = 32767 if args.max_string_size == "extended" else 4000
     raw_limit = 32767 if args.max_string_size == "extended" else 2000
     specs = []
 
-    def sized(path, limit, default):
+    def sized(path, limit, default, band_def=TEXT_BANDS):
         """(size or None for LOB, note)"""
         key = ".".join(path)
         if sampled:
             obs = maxes.get(path, 0)
+            note = "sampled max {:,} B".format(obs)
+            if bands and path in bands:
+                note += band_note(bands[path], band_def)
             if obs > limit:
-                return None, "sampled max {} B".format(obs)
-            return nice_size(obs, args.margin, limit), "sampled max {} B".format(obs)
+                return None, note
+            return nice_size(obs, args.margin, limit), note
         avg = column_avg.get(key)
         if avg and avg > limit:
             return None, "metadata avg {:,.0f} B".format(avg)
@@ -710,7 +741,7 @@ def build_specs(schema, args, maxes, sampled, column_avg):
                 add(path, t, {"kind": "blob", "otype": "BLOB"}, "fixed size")
             return
         if is_binary(u):
-            n, note = sized(path, raw_limit, raw_limit)
+            n, note = sized(path, raw_limit, raw_limit, RAW_BANDS)
             if n is None:
                 add(path, t, {"kind": "blob", "otype": "BLOB"}, note)
             else:
@@ -1614,12 +1645,12 @@ def run_generate(args):
     table = ident(args.table or namer.name((base,)), "--table")
     ext_table = ident(args.ext_table or ("EXT_" + table)[:args.max_name_len], "--ext-table")
 
-    maxes, sampled = {}, False
+    maxes, bands, sampled = {}, {}, False
     if args.sample_size:
         sys.stderr.write("Sampling up to {} ...\n".format(
             "all data" if args.sample_size == float("inf") else human(args.sample_size)))
-        maxes, nrows = sample(files, schema, args.sample_size, columns,
-                              args.multi_threaded_sampling, args.pre_buffer)
+        maxes, nrows, bands = sample(files, schema, args.sample_size, columns,
+                                     args.multi_threaded_sampling, args.pre_buffer)
         sampled = True
         sys.stderr.write("  sampled {:,} rows\n".format(nrows))
 
@@ -1631,7 +1662,7 @@ def run_generate(args):
             key = ".".join(parts_[:k])
             column_avg[key] = column_avg.get(key, 0) + c["uncompressed"] / float(max(1, total_rows))
 
-    specs = build_specs(schema, args, maxes, sampled, column_avg)
+    specs = build_specs(schema, args, maxes, sampled, column_avg, bands)
 
     # READSIZE: must hold the largest record (prefix included)
     has_lob = any(s["kind"] in ("clob", "blob") for s in specs)
