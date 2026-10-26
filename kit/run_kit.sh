@@ -251,7 +251,7 @@ drop_tables | run_sql drop_before
 step "create and load"
 for t in PQK_TYPES PQK_BIG PQK_BLOBS; do
     lt="$(echo "$t" | tr 'A-Z' 'a-z')"
-    grep -v '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/$lt.sql" | run_sql "load_$lt"
+    grep -v -e '_STG" COMPRESS FOR QUERY HIGH' -e 'ENABLE RESUMABLE' "$WORK/parts/$lt.sql" | run_sql "load_$lt"
     out="$REP/load_$lt.out"
     loaded="$(grep -E '^ *[0-9]+ +[0-9]+ *$' "$out" | tail -1 | awk '{print $1"/"$2}')"
     el="$(awk '/rows? created\./{f=1} f && /Elapsed/{print $2; exit}' "$out")"
@@ -276,7 +276,7 @@ fi
 # error-test tables: the external tables must exist; their INSERT is expected to fail
 for t in PQK_GAP PQK_ERR; do
     lt="$(echo "$t" | tr 'A-Z' 'a-z')"
-    grep -v '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/$lt.sql" | run_sql "create_$lt"
+    grep -v -e '_STG" COMPRESS FOR QUERY HIGH' -e 'ENABLE RESUMABLE' "$WORK/parts/$lt.sql" | run_sql "create_$lt"
 done
 
 # ---------------------------------------------------------------- 8. data checks

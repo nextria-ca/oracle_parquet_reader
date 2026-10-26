@@ -1266,7 +1266,10 @@ def stg_table(st):
 
 def ddl_ctas(st):
     """One-line compressed staging copy of the external table."""
-    return ["-- staging copy; run after the external table below exists:",
+    return ["-- suspend instead of failing on space errors (needs the RESUMABLE privilege):",
+            "ALTER SESSION ENABLE RESUMABLE TIMEOUT 3600 NAME {};".format(sql_str("pqora " + st["table"])),
+            "",
+            "-- staging copy; run after the external table below exists:",
             "CREATE TABLE {} COMPRESS FOR QUERY HIGH PARALLEL {} AS SELECT * FROM {};".format(
                 q(stg_table(st)), st["dop"], q(st["ext_table"]))]
 
