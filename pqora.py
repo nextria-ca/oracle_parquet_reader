@@ -35,6 +35,7 @@ Compatible with Python 3.6+ and pyarrow 6.0.1+.
 
 import argparse
 import base64
+import concurrent.futures
 import datetime
 import glob
 import hashlib
@@ -447,9 +448,55 @@ def _json_default(v):
     return str(v)
 
 
+def json_safe(arr):
+    """Rebuild a (nested) array with temporal leaves turned into ISO text in
+    Arrow, so to_pylist() never builds Python datetimes: those only cover years
+    1-9999 and raise 'date value out of range' for anything else."""
+    arr = plain(arr)
+    if arr.offset:
+        arr = arr.take(pa.array(np.arange(len(arr))))       # compact: children start at 0
+    t = arr.type
+    T = pa.types
+    if T.is_timestamp(t):
+        tz = t.tz is not None
+        if tz:
+            arr = pc.cast(arr, pa.timestamp(t.unit))          # same instant as UTC wall time
+        # 'YYYY-MM-DD hh:mm:ss.f' -> ISO 'YYYY-MM-DDThh:mm:ss.f[Z]'; Arrow's own
+        # '<value out of range: N>' marker for absurd values is left as it is
+        return pc.replace_substring_regex(pc.cast(arr, pa.string()),
+                                          pattern=r"^(-?\d+-\d\d-\d\d) (.*)$",
+                                          replacement=r"\1T\2" + ("Z" if tz else ""))
+    if T.is_date(t) or T.is_time(t):
+        if T.is_date64(t):
+            arr = pc.cast(arr, pa.date32())
+        return pc.cast(arr, pa.string())
+    if T.is_duration(t):
+        return pc.cast(arr, pa.int64())
+    if T.is_struct(t):
+        kids = [json_safe(arr.field(i)) for i in range(t.num_fields)]
+        new_t = pa.struct([pa.field(t[i].name, k.type) for i, k in enumerate(kids)])
+        return pa.Array.from_buffers(new_t, len(arr), arr.buffers()[:1], children=kids)
+    if T.is_map(t):
+        keys, items = json_safe(arr.keys), json_safe(arr.items)
+        new_t = pa.map_(keys.type, items.type)
+        # entries must use the map type's own fields (the key field is NOT NULL)
+        entries = pa.Array.from_buffers(pa.struct([new_t.key_field, new_t.item_field]), len(keys),
+                                        [None], children=[keys, items])
+        return pa.Array.from_buffers(new_t, len(arr), arr.buffers()[:2], children=[entries])
+    if T.is_list(t) or T.is_large_list(t):
+        vals = json_safe(arr.values)
+        new_t = pa.list_(vals.type) if T.is_list(t) else pa.large_list(vals.type)
+        return pa.Array.from_buffers(new_t, len(arr), arr.buffers()[:2], children=[vals])
+    if T.is_fixed_size_list(t):
+        vals = json_safe(arr.values)
+        return pa.Array.from_buffers(pa.list_(vals.type, t.list_size), len(arr), arr.buffers()[:1],
+                                     children=[vals])
+    return arr
+
+
 def to_json_array(arr):
     vals = []
-    for v in plain(arr).to_pylist():
+    for v in json_safe(arr).to_pylist():
         if v is None:
             vals.append(None)
         else:
@@ -484,9 +531,26 @@ def measure(arr, path, maxes):
         maxes[path] = max(maxes.get(path, 0), _max_len(arr))
 
 
-def sample(files, schema, budget, columns):
+def sample_row_group(rg, cols, batch_rows, budget, pre_limit):
+    """Measure one row group (up to `budget` bytes); own file handle, so it can
+    run in a worker thread. Returns ({path: max bytes}, rows)."""
+    maxes, rows, read = {}, 0, 0
+    pre = bool(pre_limit and rg.compressed <= pre_limit)
+    pf = pq.ParquetFile(rg.file, buffer_size=0 if pre else 8 * MIB, pre_buffer=pre)
+    for batch in pf.iter_batches(batch_size=batch_rows, row_groups=[rg.index], columns=cols):
+        for name in cols:
+            measure(batch.column(batch.schema.get_field_index(name)), (name,), maxes)
+        rows += batch.num_rows
+        read += batch.nbytes
+        if read >= budget:
+            break
+    return maxes, rows
+
+
+def sample(files, schema, budget, columns, workers=1, pre_limit=0):
     """Read up to `budget` bytes spread evenly across all row groups (only the
-    columns that need size estimation). Returns ({path: max bytes}, rows)."""
+    columns that need size estimation), `workers` row groups at a time.
+    Returns ({path: max bytes}, rows)."""
     cols = [f.name for f in schema if needs_sampling(f.type)]
     maxes = {}
     if not cols:
@@ -502,21 +566,21 @@ def sample(files, schema, budget, columns):
     total_rows = sum(f.rows for f in files) or 1
     sel_bytes = sum(c["uncompressed"] for p, c in columns.items() if p.split(".")[0] in cols)
     batch_rows = max(1, min(65536, int(BATCH_TARGET_BYTES / max(1.0, sel_bytes / float(total_rows)))))
-    rows, handles = 0, {}
-    for i, rg in enumerate(chosen, 1):
-        sys.stderr.write("  sampling {}/{}: {} row group {}\n".format(
-            i, len(chosen), os.path.basename(rg.file), rg.index))
-        pf = handles.get(rg.file)
-        if pf is None:
-            pf = handles[rg.file] = pq.ParquetFile(rg.file, buffer_size=8 * MIB, pre_buffer=False)
-        read = 0
-        for batch in pf.iter_batches(batch_size=batch_rows, row_groups=[rg.index], columns=cols):
-            for name in cols:
-                measure(batch.column(batch.schema.get_field_index(name)), (name,), maxes)
-            rows += batch.num_rows
-            read += batch.nbytes
-            if read >= per_rg:
-                break
+    workers = max(1, min(workers, len(chosen)))
+    sys.stderr.write("  {} row group(s), {} thread(s)\n".format(len(chosen), workers))
+    rows, done, t0 = 0, 0, time.time()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(sample_row_group, rg, cols, batch_rows, per_rg, pre_limit)
+                   for rg in chosen]
+        for fut in concurrent.futures.as_completed(futures):
+            part_max, part_rows = fut.result()
+            for k, v in part_max.items():
+                maxes[k] = max(maxes.get(k, 0), v)
+            rows += part_rows
+            done += 1
+            if done == len(chosen) or done % max(1, len(chosen) // 20) == 0:
+                sys.stderr.write("  sampled {}/{} row groups ({:,} rows, {:.0f}s)\n".format(
+                    done, len(chosen), rows, time.time() - t0))
     return maxes, rows
 
 
@@ -1554,7 +1618,8 @@ def run_generate(args):
     if args.sample_size:
         sys.stderr.write("Sampling up to {} ...\n".format(
             "all data" if args.sample_size == float("inf") else human(args.sample_size)))
-        maxes, nrows = sample(files, schema, args.sample_size, columns)
+        maxes, nrows = sample(files, schema, args.sample_size, columns,
+                              args.multi_threaded_sampling, args.pre_buffer)
         sampled = True
         sys.stderr.write("  sampled {:,} rows\n".format(nrows))
 
@@ -1842,6 +1907,8 @@ def main(argv=None):
         ap.add_argument("--sample-size", type=parse_size, metavar="SIZE",
                         help="sample this much data (e.g. 500MB, or 'all' for an exact scan) to size "
                              "VARCHAR2/RAW columns")
+        ap.add_argument("--multi-threaded-sampling", type=int, default=16, metavar="N",
+                        help="sample N row groups at a time (default 16, 1 = sequential)")
         ap.add_argument("--margin", type=float, default=1.25,
                         help="multiplier on sampled max lengths (default 1.25)")
         ap.add_argument("--default-varchar", type=int, default=4000,
