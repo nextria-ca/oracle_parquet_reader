@@ -281,10 +281,11 @@ is measured. Size = maximum × `--margin`, rounded up to a round number
 → CLOB/BLOB. The column comment shows the result and the distribution over the
 Oracle size boundaries:
 ```
-"S_LONG" CLOB, -- s_long: string, sampled max 16,127 B; <=4000 B: 8,711, 4001-32767 B: 9,471, >32767 B: 0
+"S_LONG" CLOB, -- s_long: string, sampled max 16,127 B; <=4000 B: 8,711, 4001-32767 B: 9,471
 ```
-(binary columns use RAW's 2000/32767). Nothing above 32767 means the column
-could be a VARCHAR2 on a database with `MAX_STRING_SIZE=EXTENDED`.
+(binary columns use RAW's 2000/32767; bands without values are left out).
+Nothing above 32767 means the column could be a VARCHAR2 on a database with
+`MAX_STRING_SIZE=EXTENDED`.
 
 **Sample cache**: sampling can take long, so its outcome is stored in
 `<out-dir>/<table>_sample_cache.json`, one entry per sample size (`all`, or

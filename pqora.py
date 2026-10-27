@@ -96,6 +96,11 @@ def parse_size(s):
     return int(float(m.group(1)) * mult)
 
 
+def hms(seconds):
+    seconds = int(round(seconds))
+    return "{}:{:02d}:{:02d}".format(seconds // 3600, seconds % 3600 // 60, seconds % 60)
+
+
 def warn(msg):
     sys.stderr.write("WARNING: {}\n".format(msg))
 
@@ -611,17 +616,25 @@ def sample(files, schema, budget, columns, workers=1, pre_limit=0):
     entry["threads"] = workers
     sys.stderr.write("  {} row group(s), {} thread(s)\n".format(len(chosen), workers))
     details, rows, t0 = [], 0, time.time()
+    # progress: ETA from the average speed so far, in (uncompressed) bytes of the
+    # row groups to sample, since row groups can differ a lot in size
+    todo = float(sum(min(rg.uncompressed, per_rg) for rg in chosen)) or 1.0
+    done_bytes = 0.0
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(sample_row_group, rg, cols, batch_rows, per_rg, pre_limit)
-                   for rg in chosen]
+        futures = {pool.submit(sample_row_group, rg, cols, batch_rows, per_rg, pre_limit): rg
+                   for rg in chosen}
         for fut in concurrent.futures.as_completed(futures):
             d = fut.result()
             details.append(d)
             rows += d["rows"]
+            done_bytes += min(futures[fut].uncompressed, per_rg)
             done = len(details)
             if done == len(chosen) or done % max(1, len(chosen) // 20) == 0:
-                sys.stderr.write("  sampled {}/{} row groups ({:,} rows, {:.0f}s)\n".format(
-                    done, len(chosen), rows, time.time() - t0))
+                elapsed = time.time() - t0
+                left = elapsed * (todo - done_bytes) / done_bytes if done_bytes else 0
+                sys.stderr.write("  sampled {}/{} row groups ({:,} rows, {:.0f}s, {:,.0f} rows/s{})\n".format(
+                    done, len(chosen), rows, elapsed, rows / max(elapsed, 1e-6),
+                    ", ETA {}".format(hms(left)) if done < len(chosen) else ", done"))
     details.sort(key=lambda d: (natural_key(d["file"]), d["row_group"]))
     maxes, bands, rows = combine_samples(details)
     entry.update(row_groups_sampled=len(details), rows=rows, bytes=sum(d["bytes"] for d in details),
@@ -757,9 +770,11 @@ def scalar_spec(t, u):
 
 
 def band_note(counts, bands):
+    """Counts per Oracle size band, leaving out empty bands."""
     lo, hi = bands
-    return "; <={} B: {:,}, {}-{} B: {:,}, >{} B: {:,}".format(
-        lo, counts[0], lo + 1, hi, counts[1], hi, counts[2])
+    labels = ("<={} B".format(lo), "{}-{} B".format(lo + 1, hi), ">{} B".format(hi))
+    parts = ["{}: {:,}".format(l, c) for l, c in zip(labels, counts) if c]
+    return "; " + ", ".join(parts) if parts else ""
 
 
 def build_specs(schema, args, maxes, sampled, column_avg, bands=None):
