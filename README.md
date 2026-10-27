@@ -70,7 +70,15 @@ free. Results go into the column comments, the manifest and the `generate`
 output. At load time `--out-of-range-dates` decides: `error` (default) fails
 the load, `null` loads NULL, `clamp` moves values to 0001-01-01 /
 9999-12-31 23:59:59.999999999 / 1582-10-15; the stream log counts changed
-values per column. `--no-date-check` skips the check.
+values per column. `--no-date-check` skips the check. Columns without min/max
+statistics are reported with a warning and their values are scanned.
+
+Columns whose values all fall in years 0000-0001 are almost always intervals
+(or year-less dates) stored as dates; they are loaded as `NUMBER` holding the
+raw Parquet value (days, or time units, since 1970-01-01), with a note in the
+column comment. `--column-type COLUMN=number|text|date` overrides any
+date/timestamp column: raw number, ISO text exactly as stored (any year), or a
+normal `DATE`/`TIMESTAMP`.
 
 ### Large records (`--stage-large-records`)
 

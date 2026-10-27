@@ -33,7 +33,7 @@ SQL_TIMEOUT="${SQL_TIMEOUT:-1800}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 REP="$WORK/report"
 SUMMARY="$REP/summary.txt"
-TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_GAPNULL PQK_GAPCLAMP PQK_ERR PQK_STAGE PQK_STAGE_CLOB"
+TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_GAPNULL PQK_GAPCLAMP PQK_ERR PQK_STAGE PQK_STAGE_CLOB PQK_INTERVAL PQK_INTNOSTATS PQK_INTTEXT"
 
 mkdir -p "$WORK"/{data,parts,exec,log,sql} "$REP" || exit 1
 chmod 755 "$WORK" "$WORK"/data "$WORK"/parts "$WORK"/exec
@@ -166,7 +166,13 @@ for mode in null clamp; do
     if gen "$t" gap.parquet --dop 2 --out-of-range-dates $mode; then result PASS "generate $t (--out-of-range-dates $mode)"
     else result FAIL "generate $t (see generate.out)"; fi
 done
-grep -E "^Dates" "$REP/generate.out" | sort -u | sed 's/^/INFO  /' | tee -a "$SUMMARY"
+# date/timestamp columns holding intervals (years 0000-0001): auto NUMBER, with and without statistics,
+# and --column-type text
+gen PQK_INTERVAL interval.parquet --dop 2 && gen PQK_INTNOSTATS interval_nostats.parquet --dop 2 \
+    && gen PQK_INTTEXT interval.parquet --dop 2 --column-type wait=text --column-type elapsed=text \
+    && result PASS "generate PQK_INTERVAL / PQK_INTNOSTATS / PQK_INTTEXT" \
+    || result FAIL "generate interval tables (see generate.out)"
+grep -E "^Dates|^Retyped|WARNING: .*min/max" "$REP/generate.out" | sort -u | sed 's/^/INFO  /' | tee -a "$SUMMARY"
 if gen PQK_STAGE types.parquet --dop 4 --stage-large-records; then
     result PASS "generate PQK_STAGE (--stage-large-records)"
 else
@@ -297,6 +303,16 @@ else
     result INFO "CTAS PQK_BIG_STG COMPRESS FOR QUERY HIGH not possible here: $(errors "$out" | head -1)"
 fi
 
+for t in PQK_INTERVAL PQK_INTNOSTATS PQK_INTTEXT; do
+    lt="$(echo "$t" | tr 'A-Z' 'a-z')"
+    grep -v -e '_STG" COMPRESS FOR QUERY HIGH' -e 'ENABLE RESUMABLE' "$WORK/parts/$lt.sql" | run_sql "load_$lt"
+    if errors "$REP/load_$lt.out" >/dev/null; then
+        result FAIL "create+load $t: $(errors "$REP/load_$lt.out" | head -1)"
+    else
+        result PASS "create+load $t"
+    fi
+done
+
 # error-test tables: the external tables must exist; their INSERT is expected to fail
 for t in PQK_GAP PQK_ERR PQK_GAPNULL PQK_GAPCLAMP; do
     lt="$(echo "$t" | tr 'A-Z' 'a-z')"
@@ -334,6 +350,9 @@ check types_ext_nls PQK_TYPES EXT_PQK_TYPES 4 \
     "ALTER SESSION SET NLS_DATE_FORMAT = 'DD.MM.RR';" \
     "ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'DD.MM.RR HH24.MI.SSXFF';" \
     "ALTER SESSION SET NLS_TERRITORY = 'GERMANY';"
+check interval PQK_INTERVAL PQK_INTERVAL 2
+check interval_nostats PQK_INTNOSTATS PQK_INTNOSTATS 2
+check interval_text PQK_INTTEXT PQK_INTTEXT 2
 
 # staged table: PQK_STAGE UNION ALL PQK_STAGE_CLOB must equal the source exactly
 SP="$(ls "$WORK"/parts/pqk_stage_*.pqpart | head -1)"

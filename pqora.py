@@ -800,6 +800,8 @@ GAP_FIRST = (datetime.date(1582, 10, 5) - datetime.date(1970, 1, 1)).days
 GAP_LAST = (datetime.date(1582, 10, 14) - datetime.date(1970, 1, 1)).days
 DATE_LO = (datetime.date(1, 1, 1) - datetime.date(1970, 1, 1)).days       # Oracle 4-digit years
 DATE_HI = (datetime.date(9999, 12, 31) - datetime.date(1970, 1, 1)).days
+YEAR0_FIRST = DATE_LO - 366                                               # 0000-01-01 (proleptic)
+YEAR1_LAST = (datetime.date(1, 12, 31) - datetime.date(1970, 1, 1)).days  # 0001-12-31
 
 
 class StreamError(Exception):
@@ -859,6 +861,22 @@ def to_text(arr, spec):
         return pc.cast(pc.cast(arr, pa.int64()), pa.string())
     if k == "null":
         return pa.nulls(len(arr), pa.string())
+    if k == "epoch":
+        # raw Parquet value: days (date) or units (timestamp) since 1970-01-01
+        if pa.types.is_date64(arr.type):
+            arr = pc.cast(arr, pa.date32())
+        ints = pc.cast(arr, pa.int32()) if pa.types.is_date32(arr.type) else pc.cast(arr, pa.int64())
+        return pc.cast(ints, pa.string())
+    if spec.get("render") == "date":
+        if pa.types.is_date64(arr.type):
+            arr = pc.cast(arr, pa.date32())
+        return pc.cast(arr, pa.string())
+    if spec.get("render") == "timestamp":
+        if arr.type.tz is not None:
+            arr = pc.cast(arr, pa.timestamp(arr.type.unit))
+        s = pc.cast(arr, pa.string())
+        pad = TS_PAD[arr.type.unit]
+        return pc.binary_join_element_wise(s, pa.scalar(pad), "") if pad else s
     if spec.get("json"):
         return to_json_array(arr)
     if k in ("text", "clob"):
@@ -1863,7 +1881,7 @@ def date_check(files, specs, workers):
     min/max statistics; reads values only for row groups that are flagged or
     have no usable statistics. Returns {column: result dict}."""
     dspecs = [s for s in specs if s["kind"] in ("date", "timestamp")]
-    res = {s["name"]: {"row_groups": 0, "from_stats": 0, "read": 0, "low": 0, "high": 0, "gap": 0,
+    res = {s["name"]: {"row_groups": 0, "from_stats": 0, "read": 0, "no_stats": 0, "low": 0, "high": 0, "gap": 0,
                        "bad_row_groups": 0, "min": None, "max": None, "examples": []} for s in dspecs}
     if not dspecs:
         return res
@@ -1885,7 +1903,9 @@ def date_check(files, specs, workers):
                 if st is not None and st.null_count == rg.num_rows:
                     r["from_stats"] += 1                  # all NULL
                     continue
-                if st is not None and st.has_min_max and per_day:
+                if not (st is not None and st.has_min_max and per_day):
+                    r["no_stats"] += 1
+                else:
                     lo, hi = int(st.min_raw) // per_day, int(st.max_raw) // per_day
                     r["min"] = lo if r["min"] is None else min(r["min"], lo)
                     r["max"] = hi if r["max"] is None else max(r["max"], hi)
@@ -1893,6 +1913,10 @@ def date_check(files, specs, workers):
                         r["from_stats"] += 1
                         continue
                 tasks.setdefault((f.path, i), []).append(spec)
+    for name, r in res.items():
+        if r["no_stats"]:
+            warn("{}: no min/max statistics in {} of {} row group(s) - scanning the values".format(
+                name, r["no_stats"], r["row_groups"]))
     if tasks:
         sys.stderr.write("Date check: reading {} row group(s) without usable statistics or with "
                          "suspicious ranges\n".format(len(tasks)))
@@ -1924,6 +1948,46 @@ def date_note(r):
             bad, r["low"], r["high"], r["gap"], r["bad_row_groups"])
     note += "; stats {}/{} row groups".format(r["from_stats"], r["row_groups"]) if r["read"] else ""
     return note
+
+
+COLUMN_TYPES = ("number", "days", "text", "date", "timestamp")
+
+
+def parse_column_type(s):
+    if "=" not in s:
+        raise argparse.ArgumentTypeError("expected COLUMN=TYPE, got {!r}".format(s))
+    col, typ = s.rsplit("=", 1)
+    typ = typ.strip().lower()
+    if typ not in COLUMN_TYPES:
+        raise argparse.ArgumentTypeError("TYPE must be one of {} (got {!r})".format(
+            ", ".join(COLUMN_TYPES), typ))
+    return col.strip(), typ
+
+
+def is_interval_like(r):
+    """All values in years 0000-0001: almost certainly durations or year-less
+    dates stored on a dummy year, not real dates."""
+    return bool(r) and r.get("min") is not None and r["min"] >= YEAR0_FIRST and r["max"] <= YEAR1_LAST
+
+
+def apply_column_type(spec, typ, why):
+    """Change how a date/timestamp column is loaded; returns a description."""
+    k = spec["kind"]
+    if typ in ("date", "timestamp"):
+        return None
+    unit = "day" if k == "date" else {"s": "second", "ms": "millisecond", "us": "microsecond",
+                                       "ns": "nanosecond"}[spec["unit"]]
+    if typ in ("number", "days"):
+        spec.update(kind="epoch", otype="NUMBER(10)" if k == "date" else "NUMBER(19)", from_kind=k)
+        how = "NUMBER = {}s since 1970-01-01 as stored in Parquet".format(unit)
+        if k == "date":
+            how += " (days since 0000-01-01 = value + {})".format(-YEAR0_FIRST)
+    else:
+        width = DATE_WIDTH if k == "date" else TS_WIDTH
+        spec.update(kind="text", max=width, otype="VARCHAR2({} BYTE)".format(width), render=k, from_kind=k)
+        how = "VARCHAR2 ISO text exactly as stored (any year)"
+    append_note(spec, "; {}: loaded as {}".format(why, how))
+    return "{}: {} -> {} ({})".format(spec["name"], k, spec["otype"], why)
 
 
 def append_note(spec, text):
@@ -2049,8 +2113,35 @@ def run_generate(args):
         for s in specs:
             if s["name"] in dates:
                 s["date_check"] = dates[s["name"]]
-                append_note(s, date_note(dates[s["name"]]))
         sys.stderr.write("Date check: {} column(s) in {:.1f}s\n".format(len(dates), time.time() - t0))
+    overrides = {}
+    for key, typ in args.column_type or []:
+        s = find_spec(specs, key)
+        if s["kind"] not in ("date", "timestamp"):
+            sys.exit("ERROR: --column-type {}: only date/timestamp columns can be changed ({} is {})".format(
+                key, s["name"], s["otype"]))
+        overrides[s["name"]] = typ
+    retyped = []
+    for s in specs:
+        if s["kind"] not in ("date", "timestamp"):
+            continue
+        if s["name"] in overrides:
+            d = apply_column_type(s, overrides[s["name"]], "--column-type " + overrides[s["name"]])
+        elif is_interval_like(dates.get(s["name"])):
+            d = apply_column_type(s, "number", "all values in years 0000-0001, looks like an interval "
+                                               "(--column-type {}=date|text to change)".format(s["name"]))
+        else:
+            continue
+        if d:
+            retyped.append(d)
+    for s in specs:          # date notes, after retyping (retyped columns only show their range)
+        r = dates.get(s["name"])
+        if not r:
+            continue
+        if s["kind"] in ("date", "timestamp"):
+            append_note(s, date_note(r))
+        elif r.get("min") is not None:
+            append_note(s, "; values as dates {} .. {}".format(day_text(r["min"]), day_text(r["max"])))
     if args.stage_large_records:
         if not log_dir or not log_obj:
             sys.exit("ERROR: --stage-large-records writes the large records into the log directory; "
@@ -2183,6 +2274,10 @@ def run_generate(args):
         print("Log file : {}".format(log_file))
     for c in changes:
         print("Resized  : " + c)
+    for d in retyped:
+        print("Retyped  : " + d)
+    still_dates = {s["name"] for s in specs if s["kind"] in ("date", "timestamp")}
+    dates = {n: r for n, r in dates.items() if n in still_dates}
     bad_dates = [(n, r) for n, r in dates.items() if r["low"] + r["high"] + r["gap"]]
     if dates and not bad_dates:
         print("Dates    : {} column(s) checked in every row group: all storable in Oracle".format(len(dates)))
@@ -2378,6 +2473,11 @@ def main(argv=None):
                         help="dates/timestamps Oracle can't store (before 0001-01-01, after 9999-12-31, "
                              "or 1582-10-05..14): error (default) fails the load, null loads NULL, clamp "
                              "moves them to 0001-01-01 / 9999-12-31 23:59:59.999999999 / 1582-10-15")
+        ap.add_argument("--column-type", type=parse_column_type, action="append", metavar="COLUMN=TYPE",
+                        help="load a date/timestamp column as number (raw Parquet value: days/units since "
+                             "1970-01-01), text (ISO text, any year) or date (normal; disables the "
+                             "automatic interval detection). Repeatable. Columns whose values are all in "
+                             "years 0000-0001 are loaded as number automatically")
         ap.add_argument("--no-date-check", action="store_true",
                         help="skip the check of all date/timestamp values (Parquet statistics, plus "
                              "reading row groups without statistics or with suspicious ranges)")

@@ -203,6 +203,23 @@ def make_big(path, n, rg_rows=250000):
 GAP_ROWS = 5
 
 
+def make_interval(path, stats=True):
+    """A normal date column next to 'interval' columns stored as dates/timestamps
+    in years 0000-0001 (days or time since 0000-01-01)."""
+    base = (datetime.date(1, 1, 1) - datetime.date(1970, 1, 1)).days - 366     # 0000-01-01
+    n = 1000
+    offs = [None if i % 50 == 7 else (i * 37) % 700 for i in range(n)]       # 0 .. 699 days
+    t = pa.table({
+        "id": pa.array(range(n), pa.int64()),
+        "real_date": pa.array([None if o is None else 19000 + o for o in offs], pa.date32()),
+        "wait": pa.array([None if o is None else base + o for o in offs], pa.date32()),
+        "elapsed": pa.array([None if o is None else (base + o) * 86400 * 10 ** 6 + 3723 * 10 ** 6
+                             for o in offs], pa.timestamp("us")),
+    })
+    pq.write_table(t, path, row_group_size=250, write_statistics=stats)
+    return n
+
+
 def make_gap(path):
     """Dates/timestamps Oracle can't store: one valid row, one in the 1582 calendar
     gap, one after 9999, one before 0001, one NULL (built from day numbers, since
@@ -264,7 +281,7 @@ def checks_for(spec):
     hexsum = ("SUM(CASE WHEN ({0}) IS NOT NULL THEN TO_NUMBER(SUBSTR(RAWTOHEX("
               "STANDARD_HASH({0}, 'MD5')), 1, 12), 'XXXXXXXXXXXX') END)")
     out = [("cnt", "COUNT(CASE WHEN {} IS NOT NULL THEN 1 END)".format(n))]
-    if k in ("int", "decimal", "bool", "duration"):
+    if k in ("int", "decimal", "bool", "duration", "epoch"):
         out.append(("sum", "SUM({})".format(n)))
     elif k == "float":
         cast = "UTL_RAW.CAST_FROM_BINARY_FLOAT" if spec["otype"] == "BINARY_FLOAT" \
@@ -319,7 +336,11 @@ def expected_for(spec, arr):
         if vals:
             res["max"] = ts_text(max(vals) * 86400 * 10 ** 9)[:10]
         return res
-    if k == "time" or spec.get("json"):
+    if k == "epoch":
+        vals = [int(v) for v in pqora.to_text(arr, spec).to_pylist() if v is not None]
+        res.update(cnt=len(vals), sum=sum(vals))
+        return res
+    if k == "time" or spec.get("json") or spec.get("render"):
         vals = pqora.to_text(arr, spec).to_pylist()
     else:
         vals = arr.to_pylist()
@@ -576,6 +597,9 @@ def main():
         print("types.parquet: {} rows".format(make_types(os.path.join(a.dir, "types.parquet"))))
         print("big.parquet  : {} rows".format(make_big(os.path.join(a.dir, "big.parquet"), a.big_rows)))
         print("gap.parquet  : {} rows".format(make_gap(os.path.join(a.dir, "gap.parquet"))))
+        print("interval.parquet: {} rows".format(make_interval(os.path.join(a.dir, "interval.parquet"))))
+        print("interval_nostats.parquet: {} rows".format(
+            make_interval(os.path.join(a.dir, "interval_nostats.parquet"), stats=False)))
         print("blobs.parquet: {} rows".format(make_blobs(os.path.join(a.dir, "blobs.parquet"),
                                                           [x for x in a.blob_mb.split(",") if x])))
         return 0
