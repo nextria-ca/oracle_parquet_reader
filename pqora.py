@@ -2612,8 +2612,9 @@ def main(argv=None):
             prog="pqora.py generate",
             description="Write .pqpart control files, the ORACLE_LOADER DDL and the preprocessor wrapper.")
         ap.add_argument("paths", nargs="+", help="Parquet files, globs or directories")
-        ap.add_argument("--out-dir", required=True,
-                        help="where to write the .pqpart files (OS path of --parts-dir-object)")
+        ap.add_argument("--out-dir", default=".",
+                        help="where to write the .pqpart files (OS path of --parts-dir-object; "
+                             "default: the current directory)")
         ap.add_argument("--table", help="target table name (default: first file name)")
         ap.add_argument("--ext-table", help="external table name (default: EXT_<table>)")
         ap.add_argument("--parts-dir-object", default="PQORA_PARTS",

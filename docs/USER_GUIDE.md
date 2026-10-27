@@ -130,11 +130,11 @@ driver struggles with).
 
 ### 4.2 generate
 ```
-pqora.py generate PATHS... --out-dir DIR [options]
+pqora.py generate PATHS... [--out-dir DIR] [options]
 ```
 | Option | Default | Meaning |
 |---|---|---|
-| `--out-dir DIR` | required | Where parts, `.sql`, manifest go (OS path of `--parts-dir-object`). |
+| `--out-dir DIR` | current directory | Where parts, `.sql`, manifest go (OS path of `--parts-dir-object`). |
 | `--table NAME` | file name | Target table. |
 | `--ext-table NAME` | `EXT_<table>` | External table. |
 | `--parts-dir-object OBJ` | `PQORA_PARTS` | Directory object of `--out-dir`; exec and log objects default to it. |
