@@ -98,7 +98,7 @@ Sections in file order (search for the `# ----` headers):
 | metadata | `RowGroup`, `FileInfo`, `read_file_info`, `load_files` | Footer reading; per-column aggregates |
 | inspect | `print_inspect`, `lpt_efficiency`, `compact_logical` | The report (also embedded in `<table>.sql`) |
 | arrow type helpers | `unwrap`, `is_text/binary/json_type/list_type`, `plain`, `struct_child`, `json_safe`, `to_json_array` | Type predicates; nested → JSON without Python datetimes |
-| sampling | `measure`, `_len_stats`, `sample_row_group`, `combine_samples`, `sample` | Max byte lengths + size-band counts, thread pool over row groups; returns a JSON-serializable entry |
+| sampling | `measure`, `_len_stats`, `sample_row_group`, `combine_samples`, `sample`, `_sample_task`, `_sample_worker_init` | Max byte lengths + size-band counts; a `spawn` process pool over row groups (`--multi-threaded-sampling` workers, each with `cpu_count/workers` pyarrow threads); returns a JSON-serializable entry |
 | sample cache | `sample_key`, `sample_fingerprint`, `cached_sample`, `read_sample_cache`, `write_sample_cache` | `<table>_sample_cache.json`, one entry per sample size |
 | column specs | `Namer`, `scalar_spec`, `build_specs`, `nice_size`, `band_note`, `field_layout`, `field_max_bytes` | Schema → list of column spec dicts |
 | stream mode: encoding | `to_text`, `fixed_text`, `fix_dates`, `date_ints`, `date_problems`, `prepare`, `large_mask`, `assemble`, `records_buffer`, `check_source`, `stream_part`, `run_stream`, `Oversize` | The preprocessor |

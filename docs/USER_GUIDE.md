@@ -147,7 +147,7 @@ pqora.py generate PATHS... [--out-dir DIR] [options]
 | `--pythonpath PATH` | auto | `PYTHONPATH` set in the wrapper (auto-detected if pyarrow is not in the default site-packages). |
 | `--target-size SIZE` | 0 | Group consecutive row groups into parts of about SIZE uncompressed (0 = one part per row group). |
 | `--sample-size SIZE` | none | Scan this much data (e.g. `500MB`, or `all` for an exact scan) to size string/binary/JSON columns. |
-| `--multi-threaded-sampling N` | 16 | Row groups sampled (and date-checked) at a time. |
+| `--multi-threaded-sampling N` | 16 | Row groups sampled at a time (N worker processes; also the number of threads for the date check's value scan). |
 | `--margin X` | 1.25 | Multiplier on sampled maximum lengths. |
 | `--default-varchar N` | 4000 | VARCHAR2 size when not sampled. |
 | `--max-string-size standard\|extended` | standard | Database `MAX_STRING_SIZE`: VARCHAR2/RAW limit 4000/2000 or 32767. |

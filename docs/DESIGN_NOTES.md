@@ -111,6 +111,14 @@ Python. The stream path is `prepare` (convert each column once) + `assemble`
 | Parquet format 1.0 can't store nanosecond timestamps | Test data written as format 2.6 where needed |
 | Statistics: `min_raw`/`max_raw` give physical values; `.min/.max` convert to Python (overflow risk) | Date check uses raw values + unit from the logical type JSON |
 
+## Python observations
+
+| Behaviour | Handling |
+|---|---|
+| JSON columns (lists, maps) are serialized per row in Python; Python threads can't run that in parallel (GIL): 16 sampling threads used 103% CPU | Sampling uses a process pool (`multiprocessing`, `spawn` context): 1091% CPU, 5x faster on a list column |
+| Forking a process after pyarrow has started its thread pools is unsafe | `spawn` instead of the default `fork` (Python 3.6's `ProcessPoolExecutor` has no context argument, so `multiprocessing.get_context("spawn").Pool` is used) |
+| Plain string/binary measurement runs in pyarrow/numpy and releases the GIL | Threads are enough for the date-check scan (numpy) |
+
 ## Performance observations
 
 - Local, 2M CSV-like rows, DOP 1/4/8: 12.1 s / 3.2 s / 1.8 s scan (before

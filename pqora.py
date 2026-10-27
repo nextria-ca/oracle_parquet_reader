@@ -43,6 +43,7 @@ import heapq
 import io
 import json
 import math
+import multiprocessing
 import os
 import re
 import socket
@@ -574,6 +575,15 @@ def sample_row_group(rg, cols, batch_rows, budget, pre_limit):
                         for k in sorted(maxes)]}
 
 
+def _sample_worker_init(threads):
+    pa.set_cpu_count(threads)
+    pa.set_io_thread_count(max(threads, 4))
+
+
+def _sample_task(args):
+    return sample_row_group(*args)
+
+
 def combine_samples(details):
     """({path tuple: max}, {path tuple: band counts}, rows) from row group records."""
     maxes, bands, rows = {}, {}, 0
@@ -620,14 +630,22 @@ def sample(files, schema, budget, columns, workers=1, pre_limit=0):
     # row groups to sample, since row groups can differ a lot in size
     todo = float(sum(min(rg.uncompressed, per_rg) for rg in chosen)) or 1.0
     done_bytes = 0.0
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(sample_row_group, rg, cols, batch_rows, per_rg, pre_limit): rg
-                   for rg in chosen}
-        for fut in concurrent.futures.as_completed(futures):
-            d = fut.result()
+    size_of = {(rg.file, rg.index): rg.uncompressed for rg in chosen}
+    tasks = [(rg, cols, batch_rows, per_rg, pre_limit) for rg in chosen]
+    if workers > 1:
+        # processes, not threads: JSON columns are measured in Python (GIL-bound).
+        # 'spawn' because forking a process with pyarrow thread pools is unsafe.
+        threads_each = max(1, (os.cpu_count() or workers) // workers)
+        pool = multiprocessing.get_context("spawn").Pool(
+            workers, initializer=_sample_worker_init, initargs=(threads_each,))
+        results = pool.imap_unordered(_sample_task, tasks)
+    else:
+        pool, results = None, (sample_row_group(*t) for t in tasks)
+    try:
+        for d in results:
             details.append(d)
             rows += d["rows"]
-            done_bytes += min(futures[fut].uncompressed, per_rg)
+            done_bytes += min(size_of[(d["file"], d["row_group"])], per_rg)
             done = len(details)
             if done == len(chosen) or done % max(1, len(chosen) // 20) == 0:
                 elapsed = time.time() - t0
@@ -635,6 +653,10 @@ def sample(files, schema, budget, columns, workers=1, pre_limit=0):
                 sys.stderr.write("  sampled {}/{} row groups ({:,} rows, {:.0f}s, {:,.0f} rows/s{})\n".format(
                     done, len(chosen), rows, elapsed, rows / max(elapsed, 1e-6),
                     ", ETA {}".format(hms(left)) if done < len(chosen) else ", done"))
+    finally:
+        if pool is not None:
+            pool.terminate()
+            pool.join()
     details.sort(key=lambda d: (natural_key(d["file"]), d["row_group"]))
     maxes, bands, rows = combine_samples(details)
     entry.update(row_groups_sampled=len(details), rows=rows, bytes=sum(d["bytes"] for d in details),

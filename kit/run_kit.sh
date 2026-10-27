@@ -35,6 +35,7 @@ REP="$WORK/report"
 SUMMARY="$REP/summary.txt"
 TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_GAPNULL PQK_GAPCLAMP PQK_ERR PQK_STAGE PQK_STAGE_CLOB PQK_REJECT PQK_REJECT_BAD PQK_INTERVAL PQK_INTNOSTATS PQK_INTTEXT"
 
+[ -n "$WORK" ] && rm -rf "$WORK/report"        # results of a previous run (expected checksums too)
 mkdir -p "$WORK"/{data,parts,exec,log,sql} "$REP" || exit 1
 chmod 755 "$WORK" "$WORK"/data "$WORK"/parts "$WORK"/exec
 chmod 1777 "$WORK"/log
@@ -261,6 +262,8 @@ drop_tables() {
         echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"${t}\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
         echo "/"
         echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"${t}_STG\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
+        echo "/"
+        echo "BEGIN EXECUTE IMMEDIATE 'DROP TABLE \"EXT_${t}_BAD\" PURGE'; EXCEPTION WHEN OTHERS THEN NULL; END;"
         echo "/"
     done
 }
