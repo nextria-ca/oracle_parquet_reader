@@ -220,7 +220,7 @@ In order:
 6. `CREATE TABLE <table> (…)` (and `<table>_CLOB`).
 7. `ALTER SESSION ENABLE PARALLEL DML; INSERT /*+ APPEND PARALLEL(n) */ … ; COMMIT;` (and the `_CLOB` INSERT).
 8. Row count check: loaded vs expected (main + large in staged mode).
-9. **Verification queries** reading `<table>_manifest.json` with `JSON_TABLE(TO_BLOB(BFILENAME(...)))`: overview (expected vs loaded rows, parts, columns, READSIZE, version), rows per source file, per part, column list.
+9. **Verification queries** reading `<table>_manifest.json` with `JSON_TABLE(TO_BLOB(BFILENAME(...)))`: overview (expected vs loaded rows, parts, columns, READSIZE, version), rows per source file, per part, column list. When `generate` sampled, also queries reading `<table>_sample_cache.json`: one row per cached sample size (when, row groups, rows, MiB, seconds, threads), the result per column and sample size (max bytes and the counts ≤ 4000 / ≤ 32767 / > 32767), and the per row group detail.
 10. **Source file report** as comments (the full inspect output at generate time).
 
 Running the whole file in sqlplus works; statements that need a privilege or
@@ -296,7 +296,7 @@ changing it doesn't need a new sample.
 **A value larger than its column** stops the load with a message naming every
 oversize column of that part and its largest value:
 ```
-KUP-04095: preprocessor command …/pqora.sh encountered error "pqora 1.3: sales_0006.pqpart:
+KUP-04095: preprocessor command …/pqora.sh encountered error "pqora 1.4: sales_0006.pqpart:
 column COMMENT: value of 9000 bytes exceeds the declared maximum of 4000 bytes; …"
 ```
 Fix without rescanning:
@@ -421,7 +421,7 @@ and errors. Messages `KUP-05007`/`KUP-05009` ("intra source concurrency
 disabled") are normal - parallelism comes from multiple parts.
 
 **Errors in the client**: the preprocessor's message appears in
-`KUP-04095: preprocessor command … encountered error "pqora 1.3: <part>: <message>"`
+`KUP-04095: preprocessor command … encountered error "pqora 1.4: <part>: <message>"`
 (Oracle may truncate it; the stream log has the full text).
 
 ## 13. Troubleshooting
@@ -438,7 +438,7 @@ disabled") are normal - parallelism comes from multiple parts.
 | `EXT_<table>_CLOB` empty or file not found | `EXT_<table>` not read completely yet | load `<table>` first |
 | `ERROR: … pqora.sh exists with different content and is not writable` | wrapper owned by another user (e.g. `oracle`) | remove it as that user or use `--exec-dir` |
 | `ERROR: schema of X differs from Y` | files of different tables in one `generate` | one `generate` per table |
-| `OverflowError: date value out of range` (≤ 1.2) | nested dates outside years 1-9999 | upgrade (fixed in 1.3) |
+| `OverflowError: date value out of range` (1.0, 1.1) | nested dates outside years 1-9999 | upgrade (fixed in 1.2) |
 | `ORA-64307` on the `_STG` CTAS | storage doesn't support HCC | remove `COMPRESS FOR QUERY HIGH` |
 | `ORA-01031` on `ENABLE RESUMABLE` | missing RESUMABLE privilege | `GRANT RESUMABLE TO <schema>` or ignore |
 | Load slow, high load average | NFS waits | `--pre-buffer`, `--threads`, check mount options, `--stage-large-records` |

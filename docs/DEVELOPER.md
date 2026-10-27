@@ -144,7 +144,7 @@ width 2 with max 60.
 ```json
 {
  "pqora_part": 1,                       // magic + format version (PART_FORMAT)
- "pqora_version": "1.3", "generated": "2026-10-27T…",
+ "pqora_version": "1.4", "generated": "2026-10-27T…",
  "table": "SALES", "ext_table": "EXT_SALES",
  "part": 3, "parts": 64, "rows": 250000,
  "readsize": 1048576, "lob_max": 1048555,
@@ -184,7 +184,7 @@ and the nested `sources` with `JSON_TABLE`.
  "entries": {
   "all": {                                   // key: "all" or the byte budget, e.g. "524288000"
    "sample_size": "all", "columns": ["name", "comment", …],   // top-level columns read
-   "created": "…", "pqora_version": "1.3", "threads": 16, "pre_buffer": 134217728,
+   "created": "…", "pqora_version": "1.4", "threads": 16, "pre_buffer": 134217728,
    "row_groups_total": 64, "row_groups_sampled": 64, "rows": 8000000, "bytes": 812345678, "seconds": 41.2,
    "fingerprint": {"schema": "<sha1 of the Arrow schema text>",
                    "files": [{"path": "…", "size": 123, "row_group_rows": [125000, …]}]},
@@ -197,6 +197,8 @@ and the nested `sources` with `JSON_TABLE`.
  }
 }
 ```
+`ddl_sample_cache` adds queries reading this file (`JSON_TABLE` over
+`$.entries.*`, nested `$.result[*]` and `$.row_groups[*]`) to `<table>.sql`.
 An entry is reused when its key matches `--sample-size` and its fingerprint
 matches the current files and schema; otherwise it is recomputed and replaced
 (other entries are kept). The file is written atomically (temp + rename).

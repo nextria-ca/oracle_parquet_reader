@@ -58,7 +58,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-VERSION = "1.3"
+VERSION = "1.4"
 PART_MAGIC = "pqora_part"
 PART_FORMAT = 1
 REC_WIDTH = 10                 # RECORDS VARIABLE 10
@@ -1677,6 +1677,56 @@ def ddl_manifest(st):
         "FROM JSON_TABLE({}, '$.columns[*]' COLUMNS (".format(src),
         "       column_name VARCHAR2(128) PATH '$.name', kind VARCHAR2(20) PATH '$.kind',",
         "       oracle_type VARCHAR2(60) PATH '$.otype', note VARCHAR2(4000) PATH '$.note')) c;",
+    ] + ddl_sample_cache(st)
+
+
+def ddl_sample_cache(st):
+    """Queries reading <table>_sample_cache.json (only when generate sampled)."""
+    if not st.get("sampling"):
+        return []
+    name = st["table"].lower() + "_sample_cache.json"
+    src = "TO_BLOB(BFILENAME({}, {})) FORMAT JSON".format(sql_str(st["parts_dir_object"]),
+                                                         sql_str(name))
+    return [
+        "",
+        "-- " + "-" * 75,
+        "-- Sampling: {} (in {}), one entry per --sample-size".format(name, st["parts_dir_object"]),
+        "-- size bands: n_small <= 4000 B (RAW: 2000), n_extended <= 32767 B, n_lob > 32767 B",
+        "-- " + "-" * 75,
+        "",
+        "-- sample runs",
+        "SELECT e.sample_size, SUBSTR(e.created, 1, 19) AS created, e.row_groups_sampled,",
+        "       e.row_groups_total, e.sampled_rows, ROUND(e.sampled_bytes / 1048576, 1) AS sampled_mib,",
+        "       e.seconds, e.threads, e.version",
+        "FROM JSON_TABLE({}, '$.entries.*' COLUMNS (".format(src),
+        "       sample_size VARCHAR2(20) PATH '$.sample_size', created VARCHAR2(40) PATH '$.created',",
+        "       row_groups_sampled NUMBER PATH '$.row_groups_sampled',",
+        "       row_groups_total NUMBER PATH '$.row_groups_total', sampled_rows NUMBER PATH '$.rows',",
+        "       sampled_bytes NUMBER PATH '$.bytes', seconds NUMBER PATH '$.seconds',",
+        "       threads NUMBER PATH '$.threads', version VARCHAR2(20) PATH '$.pqora_version')) e",
+        "ORDER BY e.created;",
+        "",
+        "-- result per column and sample size",
+        "SELECT r.sample_size, SUBSTR(r.column_path, 1, 60) AS column_path, r.max_bytes,",
+        "       r.n_small, r.n_extended, r.n_lob",
+        "FROM JSON_TABLE({}, '$.entries.*' COLUMNS (".format(src),
+        "       sample_size VARCHAR2(20) PATH '$.sample_size',",
+        "       NESTED PATH '$.result[*]' COLUMNS (",
+        "         column_path VARCHAR2(4000) FORMAT JSON PATH '$.path', max_bytes NUMBER PATH '$.max',",
+        "         n_small NUMBER PATH '$.bands[0]', n_extended NUMBER PATH '$.bands[1]',",
+        "         n_lob NUMBER PATH '$.bands[2]'))) r",
+        "ORDER BY r.column_path, r.sample_size;",
+        "",
+        "-- per row group",
+        "SELECT g.sample_size, SUBSTR(g.file_path, 1, 100) AS file_path, g.row_group, g.sampled_rows,",
+        "       g.rows_in_row_group, ROUND(g.sampled_bytes / 1048576, 1) AS sampled_mib, g.seconds",
+        "FROM JSON_TABLE({}, '$.entries.*' COLUMNS (".format(src),
+        "       sample_size VARCHAR2(20) PATH '$.sample_size',",
+        "       NESTED PATH '$.row_groups[*]' COLUMNS (",
+        "         file_path VARCHAR2(4000) PATH '$.file', row_group NUMBER PATH '$.row_group',",
+        "         sampled_rows NUMBER PATH '$.rows', rows_in_row_group NUMBER PATH '$.rows_in_row_group',",
+        "         sampled_bytes NUMBER PATH '$.bytes', seconds NUMBER PATH '$.seconds'))) g",
+        "ORDER BY g.sample_size, g.file_path, g.row_group;",
     ]
 
 

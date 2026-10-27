@@ -55,6 +55,14 @@ external table. Side files are written per part to a temp name and renamed on
 success, because every read of the external table re-runs the preprocessor
 (including interrupted ones like `ROWNUM` queries).
 
+### Sample cache
+Sampling large datasets (especially `--sample-size all` over NFS) can take a
+long time and is repeated whenever a table is regenerated (new options, new
+version). Its outcome is therefore cached per sample size next to the parts,
+keyed by a fingerprint of the input files and schema so stale results are never
+reused; deleting the file forces a new sample. `--margin` and sizing rules are
+applied after the cache, so they can change without re-sampling.
+
 ### Vectorized encoding
 Records are built with Arrow compute (`utf8_lpad`, `binary_join_element_wise`)
 over whole columns, and the output is the Arrow values buffer - no per-row

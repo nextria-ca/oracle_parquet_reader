@@ -45,7 +45,7 @@ sqlplus <schema>@<pdb> @/u01/pqora/sales.sql
 
 `sales.sql` creates `EXT_SALES` (external) and `SALES` (target), loads with a
 parallel direct-path INSERT, compares loaded vs expected rows and shows the
-manifest as tables.
+manifest and the sampling results as tables.
 
 ## Main features
 
@@ -54,7 +54,8 @@ manifest as tables.
   NULL vs empty LOB preserved; numbers, floats (bit-exact), decimals, timestamps
   to nanoseconds, binary, Unicode, embedded newlines/NUL bytes.
 - Column sizing from data (`--sample-size all`), with counts per Oracle size
-  band (VARCHAR2 4000 / extended 32767 / CLOB).
+  band (VARCHAR2 4000 / extended 32767 / CLOB); sampling results are cached
+  per sample size (`<table>_sample_cache.json`) so later runs are instant.
 - Nested data: structs flattened to `PARENT#CHILD` columns, lists (`_LST`)
   and maps as JSON text.
 - Date safety: every date/timestamp checked against Oracle's range (from

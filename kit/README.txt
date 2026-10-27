@@ -73,6 +73,6 @@ What it tests
   - large BLOBs (READSIZE), ROWNUM early stop, a changed Parquet file and a
     date in the 1582 calendar gap (both must fail with a clear message)
   - whether COMPRESS FOR QUERY HIGH works on this storage (INFO only)
-  - the manifest verification queries at the end of every <table>.sql
+  - the manifest and sampling-cache queries at the end of every <table>.sql
 
 Locally (Oracle 23ai) the kit reports 39 passed checks.

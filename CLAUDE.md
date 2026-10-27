@@ -48,4 +48,5 @@ Start with `README.md`, then:
 ## Glossary
 part = `.pqpart` JSON work unit · spec = column spec dict (DEVELOPER.md 4.1) ·
 staged mode = `--stage-large-records` (`<table>_CLOB`) · manifest =
-`<table>_manifest.json` · stream log = `<table>_stream.log`.
+`<table>_manifest.json` · sample cache = `<table>_sample_cache.json` (one entry
+per `--sample-size`; delete to re-sample) · stream log = `<table>_stream.log`.
