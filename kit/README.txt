@@ -60,11 +60,19 @@ What it tests
     lists/maps, dates 0001-01-01 .. 9999-12-31)
   - inspect, generate, offline framing verification, the wrapper with an
     empty environment (as Oracle runs it)
-  - CREATE external table + parallel direct-path INSERT for 3 tables
+  - CREATE external table + parallel direct-path INSERT for every test table
   - per-column checksums (counts, sums, MD5 sums, bit patterns of floats)
     of the external tables and of the loaded tables, compared with values
     computed by pyarrow; once more with German NLS session settings
+  - --stage-large-records: main table + <table>_CLOB, checked exactly
+  - dates: the statistics-based check, --out-of-range-dates null and clamp
+    (exact values), interval columns (years 0000-0001) loaded as numbers with
+    and without Parquet statistics, --column-type text
   - parallel execution (how many preprocessors ran at once) and scan
     timings at several DOPs
   - large BLOBs (READSIZE), ROWNUM early stop, a changed Parquet file and a
     date in the 1582 calendar gap (both must fail with a clear message)
+  - whether COMPRESS FOR QUERY HIGH works on this storage (INFO only)
+  - the manifest verification queries at the end of every <table>.sql
+
+Locally (Oracle 23ai) the kit reports 39 passed checks.

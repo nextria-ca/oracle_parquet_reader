@@ -1,136 +1,92 @@
-# oracle_parquet_reader
+# oracle_parquet_reader (pqora)
 
-Load Parquet files into Oracle **in parallel, one row group per parallel worker**,
-through an `ORACLE_LOADER` external table whose preprocessor (`pqora.py`) reads
-the Parquet data with pyarrow. Oracle's own Parquet driver (`ORACLE_BIGDATA`) is
-not used, so its format/encoding incompatibilities don't apply and the
-parallelism is not limited to one worker per file.
+Load Parquet files into Oracle **in parallel, one Parquet row group per parallel
+worker**, through an `ORACLE_LOADER` external table whose *preprocessor* is
+`pqora.py`. pqora reads the Parquet data with pyarrow and streams it to Oracle
+in a binary-safe, length-prefixed text format.
 
-Runs on Python 3.6+ with pyarrow 6.0.1+ and numpy (e.g. Oracle Database
-Appliance with Oracle Linux 7).
+Oracle's own Parquet support (`ORACLE_BIGDATA`) is not used: it rejected some of
+our files (format/encoding incompatibilities) and does not split a single
+Parquet file across parallel workers. pqora reads any Parquet file pyarrow can
+read and parallelizes by row group.
 
-## Files
+Runs on **Python 3.6+ with pyarrow 6.0.1+ and numpy** (the Oracle Database
+Appliance with Oracle Linux 7 is the reference target).
 
-| File | Purpose |
-|---|---|
-| `pqora.py` | the tool: inspect, generate, stream (preprocessor), verify |
-| `pqora_selftest.py` | test data generator and Oracle-vs-pyarrow checksum comparison |
-| `kit/` | unattended test kit for a database server (`make_kit.sh` builds the tarball) |
-| `parquet_inspect.py` | earlier metadata/DDL script for the native `ORACLE_BIGDATA` driver |
-
-## Usage
+## How it works in one picture
 
 ```
-# 1. inspect (default mode): sizes, row groups, per-column physical/logical
-#    types, encodings, codecs, parallelism estimate
-pqora.py /data/sales/*.parquet
+Parquet files ──► pqora.py generate ──► <table>_0001.pqpart … (one per row group = parallel work unit)
+                                        <table>.sql             (external table, target table, INSERT, checks)
+                                        <table>_manifest.json   (everything generate decided)
+                                        pqora.sh                (preprocessor wrapper)
 
-# 2. generate: one .pqpart per row group (or --target-size to group them),
-#    the DDL (external table + target table + parallel INSERT) and pqora.sh.
-#    One run = one table; loop over files/directories for several tables.
-pqora.py generate /data/sales/ --table SALES --out-dir /u01/pqora --sample-size all --dop 16
+SELECT/INSERT … FROM EXT_<table>  ──►  Oracle PX servers, one per .pqpart
+                                        └─► pqora.sh <part> ──► pqora.py stream mode ──► stdout records
+                                                                 (reads only that part's row groups)
+```
 
-# 3. as DBA, one directory object for everything (default name PQORA_PARTS):
+## Quick start
+
+```bash
+# 1. look at the files: rows, row groups, column types/encodings/codecs, parallelism
+python3 pqora.py /data/sales/*.parquet
+
+# 2. generate part files, DDL and wrapper (one run = one table)
+python3 pqora.py generate /data/sales/ --table SALES --out-dir /u01/pqora --sample-size all --dop 16
+
+# 3. as DBA, once: one directory object for everything
 #      CREATE DIRECTORY PQORA_PARTS AS '/u01/pqora';
 #      GRANT READ, WRITE, EXECUTE ON DIRECTORY PQORA_PARTS TO <schema>;
-#    then run /u01/pqora/sales.sql
-#    (separate objects: --exec-dir-object/--exec-dir, --log-dir-object/--log-dir)
 
-# optional: check the stream framing of parts without Oracle
-pqora.py verify /u01/pqora/sales_0001.pqpart
+# 4. load
+sqlplus <schema>@<pdb> @/u01/pqora/sales.sql
 ```
 
-### Column sizes
+`sales.sql` creates `EXT_SALES` (external) and `SALES` (target), loads with a
+parallel direct-path INSERT, compares loaded vs expected rows and shows the
+manifest as tables.
 
-`--sample-size all` sizes `VARCHAR2`/`RAW` columns from the data. When a value
-is still too large, the load fails with a message naming every oversize column
-of that part and its largest value. To fix without rescanning the data:
+## Main features
 
-```
-# set sizes yourself (Oracle column name or Parquet path; 'lob' = CLOB/BLOB)
-pqora.py resize /u01/pqora/sales_manifest.json --field-size COMMENT=8000 --field-size user.name=200
+- One parallel work unit per row group (or grouped with `--target-size`).
+- Exact data: every value round-trips (verified by checksum comparison in Oracle);
+  NULL vs empty LOB preserved; numbers, floats (bit-exact), decimals, timestamps
+  to nanoseconds, binary, Unicode, embedded newlines/NUL bytes.
+- Column sizing from data (`--sample-size all`), with counts per Oracle size
+  band (VARCHAR2 4000 / extended 32767 / CLOB).
+- Nested data: structs flattened to `PARENT#CHILD` columns, lists (`_LST`)
+  and maps as JSON text.
+- Date safety: every date/timestamp checked against Oracle's range (from
+  Parquet statistics), `--out-of-range-dates error|null|clamp`, interval-like
+  date columns (years 0000-0001) loaded as numbers, `--column-type` overrides.
+- Large values: `--stage-large-records` keeps CLOBs out of the bulk load and
+  diverts records with large values to a `<table>_CLOB` table.
+- Size fixes without rescanning: `resize --field-size` / `--auto-field-size-fix`
+  (reads the failed load's logs).
+- Tuning: `--threads`, `--pre-buffer` (large coalesced reads, good for NFS),
+  multi-threaded sampling.
+- A self-contained test kit (`kit/`) that runs every experiment on a database
+  server unattended and returns one report.
 
-# or take them from the failed load's logs (ORACLE_LOADER logs + pqora stream log)
-pqora.py resize /u01/pqora/sales_manifest.json --auto-field-size-fix
-```
+## Documentation
 
-`resize` updates the part files and `sales.sql`, and writes `sales_alter.sql`,
-which recreates the external table and widens the target table; then rerun
-the INSERT. `--field-size` and `--auto-field-size-fix` also work on `generate`.
-Sizes above the `VARCHAR2`/`RAW` limit become `CLOB`/`BLOB`, and READSIZE grows
-when needed. `--dry-run` shows the changes only.
+| Document | For |
+|---|---|
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Setup, workflow, all options, generated files, type mapping, dates, large records, tuning, logs, troubleshooting |
+| [docs/DEVELOPER.md](docs/DEVELOPER.md) | Architecture, code map, data structures and file formats, stream format, pipelines, testing, release |
+| [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) | Why it is built this way; verified Oracle / pyarrow behaviours; open questions |
+| [kit/README.txt](kit/README.txt) | Running the test kit on a database server |
+| [CLAUDE.md](CLAUDE.md) | Orientation for AI assistants working on this repo |
 
-### Dates
+## Repository layout
 
-`generate` checks every date/timestamp column in every row group against what
-Oracle can store (0001-01-01 .. 9999-12-31, without 1582-10-05..14). It uses
-the Parquet min/max statistics and reads values only for row groups without
-usable statistics (e.g. INT96) or with a suspicious range, so it is usually
-free. Results go into the column comments, the manifest and the `generate`
-output. At load time `--out-of-range-dates` decides: `error` (default) fails
-the load, `null` loads NULL, `clamp` moves values to 0001-01-01 /
-9999-12-31 23:59:59.999999999 / 1582-10-15; the stream log counts changed
-values per column. `--no-date-check` skips the check. Columns without min/max
-statistics are reported with a warning and their values are scanned.
-
-Columns whose values all fall in years 0000-0001 are almost always intervals
-(or year-less dates) stored as dates; they are loaded as `NUMBER` holding the
-raw Parquet value (days, or time units, since 1970-01-01), with a note in the
-column comment. `--column-type COLUMN=number|text|date` overrides any
-date/timestamp column: raw number, ISO text exactly as stored (any year), or a
-normal `DATE`/`TIMESTAMP`.
-
-### Large records (`--stage-large-records`)
-
-A single CLOB column in the external table slows the whole load down. With
-`--stage-large-records` the main external table `EXT_<table>` has no LOB
-columns (would-be CLOB/BLOB columns become `VARCHAR2`/`RAW` at the limit), and
-every record with a value larger than its column is written - instead of being
-loaded - to `<table>_clob_NNNN.dat` in the log directory. A second external
-table `EXT_<table>_CLOB` (all string columns CLOB, binary BLOB, no
-preprocessor) reads those files into `<table>_CLOB`. `<table>.sql` contains
-both; `EXT_<table>_CLOB` is complete only after `EXT_<table>` has been read in
-full (interrupted reads keep the previous files).
-
-### Reading
-
-Each preprocessor process uses `--threads` pyarrow threads (default 8) to
-decode a row group's columns in parallel. Row groups up to `--pre-buffer`
-compressed bytes (default 128 MB) are fetched with large, coalesced, concurrent
-reads (memory about one row group per process), which helps on NFS; larger
-ones are streamed in 8 MB reads. `--pre-buffer 0` always streams. The stream
-log records `mb_per_s` per part, to compare settings.
-
-Oracle runs `pqora.sh <location file>` for each `.pqpart`; with one argument
-that is a part file, `pqora.py` streams that part's rows to stdout. Everything
-the stream needs (Parquet path and size, row groups, column specification,
-READSIZE) is inside the part file, so the stream can't drift from the DDL.
-Stream mode refuses to run if the Parquet file changed since `generate`.
-
-## Stream format
-
-`ORACLE_LOADER` with `RECORDS VARIABLE 10`, `CHARACTERSET AL32UTF8`,
-`STRING SIZES ARE IN BYTES`:
-
-| Data | Field | Notes |
-|---|---|---|
-| text, numbers | `VARCHARC(w,max)` | length prefix, no escaping of any byte |
-| binary | `VARRAWC(w,max)` | raw bytes, no hex |
-| timestamps | `CHAR(29) DATE_FORMAT TIMESTAMP MASK "YYYY-MM-DD HH24:MI:SS.FF9"` | UTC for tz-aware |
-| dates | `CHAR(10) DATE_FORMAT DATE MASK "YYYY-MM-DD"` | |
-| CLOB / BLOB | `CHAR(1)` indicator + `VARCHARC/VARRAWC(10,max) NULLIF ind='N'` | keeps NULL and empty LOBs apart |
-
-Type mapping: integers → `NUMBER(p)`, decimals → `NUMBER(p,s)`, float/double →
-`BINARY_FLOAT/BINARY_DOUBLE` (exact round trip), bool → `NUMBER(1)`, strings →
-`VARCHAR2(n BYTE)` or `CLOB`, binary → `RAW(n)` or `BLOB`, structs flattened as
-`PARENT#CHILD` columns, lists/maps → JSON text.
-
-## Known limits (verified on Oracle 23ai)
-
-- Oracle stores `-0.0` as `+0.0` (no loader can keep it).
-- Oracle's calendar is Julian before 1582-10-15; dates keep their text, but
-  1582-10-05..14 don't exist there, so pqora refuses them instead of letting
-  Oracle shift them silently.
-- `READSIZE` must exceed the largest record; pqora caps it at 128 MB by default
-  (a 512 MB READSIZE hung on 23ai). Larger values fail with a clear error.
-- A row group is the smallest parallel unit.
+| Path | What |
+|---|---|
+| `pqora.py` | The tool (single file): inspect, generate, stream (preprocessor), verify, resize |
+| `pqora_selftest.py` | Test data generator and Oracle-vs-pyarrow checksum comparison |
+| `kit/run_kit.sh` | Unattended test kit runner (all experiments, one report tarball) |
+| `kit/make_kit.sh` | Builds `dist/pqora_kit_<version>.tar.gz` |
+| `kit/README.txt` | Kit instructions (shipped inside the tarball) |
+| `parquet_inspect.py` | Earlier prototype for the native `ORACLE_BIGDATA` driver (superseded by pqora) |
+| `dist/` | Built kit tarballs (git-ignored) |

@@ -3,13 +3,22 @@
 pqora_selftest.py - test data and result checks for pqora.py.
 
   make DIR [--big-rows N] [--blob-mb 1,10,50,100]
-        write types.parquet, big.parquet and blobs.parquet into DIR
-  expected PART_FILE > expected.json
+        write the test files into DIR:
+          types.parquet            every supported type and the nasty cases
+          big.parquet              CSV-like rows for throughput/parallelism
+          blobs.parquet            one row group per BLOB size (READSIZE tests)
+          gap.parquet              dates Oracle can't store (1582 gap, 10000, 0000)
+          interval.parquet         dates/timestamps in years 0000-0001 (intervals)
+          interval_nostats.parquet the same without Parquet statistics
+  expected PART_FILE [--stage] > expected.json
         compute per-column checksums from the Parquet files of a table
-        (any one .pqpart of the table; all parts are read)
-  sql PART_FILE TABLE > check.sql
+        (any one .pqpart of the table; all parts are read). --stage: for
+        <table> UNION ALL <table>_CLOB (--stage-large-records)
+  sql PART_FILE TABLE [--dop N] [--stage] > check.sql
         print a query computing the same checksums in Oracle (one scan);
         each output line is  CHK|<column>.<check>|<value>
+  stageview PART_FILE VIEW > view.sql
+        CREATE VIEW over <table> UNION ALL <table>_CLOB with LOB columns
   compare expected.json SPOOL [--label NAME]
         compare the query output with the expected values; exit 1 on mismatch
   parallel LOG_FILE TABLE [--since ISO]
