@@ -1,0 +1,153 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 610" width="960" height="610" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .t  { font-size: 22px; font-weight: 700; fill: #0F172A; }
+      .st { font-size: 13px; fill: #64748B; }
+      .sec { font-size: 12px; font-weight: 700; fill: #64748B; letter-spacing: 1.5px; }
+      .h  { font-size: 14px; font-weight: 700; }
+      .s  { font-size: 11.5px; fill: #475569; }
+      .m  { font-family: Consolas, 'DejaVu Sans Mono', monospace; font-size: 11.5px; }
+      .ln { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+    </style>
+  </defs>
+  <rect width="960" height="610" rx="16" fill="#FFFFFF"/>
+
+  <text x="30" y="42" class="t">How pqora loads Parquet into Oracle</text>
+  <text x="30" y="64" class="st">pyarrow decodes Parquet, Oracle runs the parallel scan and the direct-path insert, pqora connects the two</text>
+
+  <!-- ===== PLAN ===== -->
+  <text x="30" y="98" class="sec">1  PLAN · pqora.py generate (once per table)</text>
+
+  <!-- Parquet files -->
+  <rect x="30" y="110" width="210" height="150" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+  <text x="135" y="133" class="h" fill="#1E3A8A" text-anchor="middle">Parquet files</text>
+  <g>
+    <rect x="58" y="145" width="66" height="92" rx="4" fill="#FFFFFF" stroke="#2563EB"/>
+    <rect x="64" y="152" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="64" y="172" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="64" y="192" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="64" y="212" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="146" y="145" width="66" height="92" rx="4" fill="#FFFFFF" stroke="#2563EB"/>
+    <rect x="152" y="152" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="152" y="172" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="152" y="192" width="54" height="16" rx="2" fill="#93C5FD"/>
+    <rect x="152" y="212" width="54" height="16" rx="2" fill="#93C5FD"/>
+  </g>
+  <text x="135" y="252" class="s" text-anchor="middle">each stripe = one row group</text>
+
+  <path d="M240,185 L282,185" class="ln"/>
+
+  <!-- generate -->
+  <rect x="285" y="125" width="180" height="120" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.5"/>
+  <text x="375" y="150" class="h" fill="#065F46" text-anchor="middle">pqora.py generate</text>
+  <text x="375" y="174" class="s" text-anchor="middle">reads footers &amp; statistics</text>
+  <text x="375" y="192" class="s" text-anchor="middle">measures column sizes</text>
+  <text x="375" y="210" class="s" text-anchor="middle">checks every date</text>
+  <text x="375" y="228" class="s" text-anchor="middle">plans parallel parts</text>
+
+  <path d="M465,185 L507,185" class="ln"/>
+
+  <!-- outputs -->
+  <rect x="510" y="110" width="205" height="66" rx="8" fill="#F8FAFC" stroke="#94A3B8"/>
+  <text x="522" y="134" class="m" fill="#0F172A">sales_0001..0064.pqpart</text>
+  <text x="522" y="155" class="s">one parallel work unit each</text>
+  <rect x="725" y="110" width="205" height="66" rx="8" fill="#F8FAFC" stroke="#94A3B8"/>
+  <text x="737" y="134" class="m" fill="#0F172A">sales.sql</text>
+  <text x="737" y="155" class="s">DDL, parallel INSERT, checks</text>
+  <rect x="510" y="194" width="205" height="66" rx="8" fill="#F8FAFC" stroke="#94A3B8"/>
+  <text x="522" y="218" class="m" fill="#0F172A">sales_manifest.json</text>
+  <text x="522" y="239" class="s">every decision, queryable in SQL</text>
+  <rect x="725" y="194" width="205" height="66" rx="8" fill="#F8FAFC" stroke="#94A3B8"/>
+  <text x="737" y="218" class="m" fill="#0F172A">pqora.sh</text>
+  <text x="737" y="239" class="s">preprocessor wrapper</text>
+
+  <line x1="30" y1="285" x2="930" y2="285" stroke="#E2E8F0" stroke-width="1.5" stroke-dasharray="6 5"/>
+
+  <!-- ===== LOAD ===== -->
+  <text x="30" y="314" class="sec">2  LOAD · every part in parallel</text>
+
+  <rect x="30" y="326" width="900" height="266" rx="12" fill="#FFF8F6" stroke="#C74634" stroke-width="1.5"/>
+  <text x="48" y="350" class="h" fill="#7F1D1D">Oracle Database</text>
+
+  <!-- QC -->
+  <rect x="48" y="364" width="170" height="196" rx="8" fill="#FFFFFF" stroke="#C74634"/>
+  <text x="133" y="386" class="h" fill="#7F1D1D" text-anchor="middle">Query coordinator</text>
+  <text x="60" y="412" class="m" fill="#334155">INSERT /*+ APPEND</text>
+  <text x="60" y="428" class="m" fill="#334155">  PARALLEL(16) */</text>
+  <text x="60" y="444" class="m" fill="#334155">INTO sales</text>
+  <text x="60" y="460" class="m" fill="#334155">SELECT * FROM</text>
+  <text x="60" y="476" class="m" fill="#334155">  ext_sales</text>
+  <text x="133" y="512" class="s" text-anchor="middle">hands out parts to</text>
+  <text x="133" y="528" class="s" text-anchor="middle">PX servers, largest first</text>
+
+  <!-- lanes -->
+  <g>
+    <path d="M218,390 L246,390" class="ln"/>
+    <rect x="250" y="370" width="135" height="40" rx="6" fill="#F8FAFC" stroke="#94A3B8"/>
+    <text x="317" y="395" class="m" fill="#0F172A" text-anchor="middle">sales_0001.pqpart</text>
+    <path d="M385,390 L408,390" class="ln"/>
+    <rect x="411" y="370" width="200" height="40" rx="6" fill="#ECFDF5" stroke="#059669"/>
+    <text x="511" y="387" class="h" font-size="12.5" fill="#065F46" text-anchor="middle">pqora stream</text>
+    <text x="511" y="403" class="s" text-anchor="middle">pyarrow · 8 threads</text>
+    <path d="M611,390 L634,390" class="ln"/>
+    <rect x="637" y="370" width="150" height="40" rx="6" fill="#FFFFFF" stroke="#C74634"/>
+    <text x="712" y="387" class="h" font-size="12.5" fill="#7F1D1D" text-anchor="middle">PX server 1</text>
+    <text x="712" y="403" class="s" text-anchor="middle">ORACLE_LOADER</text>
+    <path d="M787,390 L812,420" class="ln"/>
+  </g>
+  <g>
+    <path d="M218,438 L246,438" class="ln"/>
+    <rect x="250" y="418" width="135" height="40" rx="6" fill="#F8FAFC" stroke="#94A3B8"/>
+    <text x="317" y="443" class="m" fill="#0F172A" text-anchor="middle">sales_0002.pqpart</text>
+    <path d="M385,438 L408,438" class="ln"/>
+    <rect x="411" y="418" width="200" height="40" rx="6" fill="#ECFDF5" stroke="#059669"/>
+    <text x="511" y="435" class="h" font-size="12.5" fill="#065F46" text-anchor="middle">pqora stream</text>
+    <text x="511" y="451" class="s" text-anchor="middle">pyarrow · 8 threads</text>
+    <path d="M611,438 L634,438" class="ln"/>
+    <rect x="637" y="418" width="150" height="40" rx="6" fill="#FFFFFF" stroke="#C74634"/>
+    <text x="712" y="435" class="h" font-size="12.5" fill="#7F1D1D" text-anchor="middle">PX server 2</text>
+    <text x="712" y="451" class="s" text-anchor="middle">ORACLE_LOADER</text>
+    <path d="M787,438 L812,446" class="ln"/>
+  </g>
+  <g>
+    <path d="M218,486 L246,486" class="ln"/>
+    <rect x="250" y="466" width="135" height="40" rx="6" fill="#F8FAFC" stroke="#94A3B8"/>
+    <text x="317" y="491" class="m" fill="#0F172A" text-anchor="middle">sales_0003.pqpart</text>
+    <path d="M385,486 L408,486" class="ln"/>
+    <rect x="411" y="466" width="200" height="40" rx="6" fill="#ECFDF5" stroke="#059669"/>
+    <text x="511" y="483" class="h" font-size="12.5" fill="#065F46" text-anchor="middle">pqora stream</text>
+    <text x="511" y="499" class="s" text-anchor="middle">pyarrow · 8 threads</text>
+    <path d="M611,486 L634,486" class="ln"/>
+    <rect x="637" y="466" width="150" height="40" rx="6" fill="#FFFFFF" stroke="#C74634"/>
+    <text x="712" y="483" class="h" font-size="12.5" fill="#7F1D1D" text-anchor="middle">PX server 3</text>
+    <text x="712" y="499" class="s" text-anchor="middle">ORACLE_LOADER</text>
+    <path d="M787,486 L812,478" class="ln"/>
+  </g>
+  <g>
+    <path d="M218,534 L246,534" class="ln"/>
+    <rect x="250" y="514" width="135" height="40" rx="6" fill="#F8FAFC" stroke="#94A3B8"/>
+    <text x="317" y="539" class="m" fill="#0F172A" text-anchor="middle">sales_0016.pqpart</text>
+    <path d="M385,534 L408,534" class="ln"/>
+    <rect x="411" y="514" width="200" height="40" rx="6" fill="#ECFDF5" stroke="#059669"/>
+    <text x="511" y="531" class="h" font-size="12.5" fill="#065F46" text-anchor="middle">pqora stream</text>
+    <text x="511" y="547" class="s" text-anchor="middle">pyarrow · 8 threads</text>
+    <path d="M611,534 L634,534" class="ln"/>
+    <rect x="637" y="514" width="150" height="40" rx="6" fill="#FFFFFF" stroke="#C74634"/>
+    <text x="712" y="531" class="h" font-size="12.5" fill="#7F1D1D" text-anchor="middle">PX server 16</text>
+    <text x="712" y="547" class="s" text-anchor="middle">ORACLE_LOADER</text>
+    <path d="M787,534 L812,504" class="ln"/>
+  </g>
+  <text x="317" y="578" class="s" text-anchor="middle">… next part as soon as a PX server is free</text>
+  <text x="624" y="578" class="s" text-anchor="middle">records via stdout</text>
+
+  <!-- target table -->
+  <rect x="815" y="380" width="100" height="150" rx="8" fill="#C74634"/>
+  <ellipse cx="865" cy="380" rx="50" ry="10" fill="#E8735F"/>
+  <text x="865" y="430" class="h" fill="#FFFFFF" text-anchor="middle">SALES</text>
+  <text x="865" y="455" font-size="11.5" fill="#FFE4DE" text-anchor="middle">parallel</text>
+  <text x="865" y="471" font-size="11.5" fill="#FFE4DE" text-anchor="middle">direct-path</text>
+  <text x="865" y="487" font-size="11.5" fill="#FFE4DE" text-anchor="middle">insert</text>
+</svg>

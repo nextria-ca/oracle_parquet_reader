@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 290" width="960" height="290" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#D97706"/></marker>
+    <style>
+      .t  { font-size: 22px; font-weight: 700; fill: #0F172A; }
+      .st { font-size: 13px; fill: #64748B; }
+      .n  { font-size: 13px; font-weight: 700; fill: #FFFFFF; opacity: 0.8; }
+      .h  { font-size: 18px; font-weight: 700; fill: #FFFFFF; }
+      .m  { font-family: Consolas, 'DejaVu Sans Mono', monospace; font-size: 11.5px; fill: #0F172A; }
+      .s  { font-size: 11.5px; fill: #475569; }
+    </style>
+  </defs>
+  <rect width="960" height="290" rx="16" fill="#FFFFFF"/>
+  <text x="30" y="42" class="t">From Parquet files to a loaded table in four commands</text>
+
+  <!-- chevrons: x = 30 + i*228, w = 220 -->
+  <polygon points="30,70 230,70 250,105 230,140 30,140" fill="#2563EB"/>
+  <text x="48" y="96" class="n">1</text><text x="48" y="122" class="h">Inspect</text>
+  <polygon points="258,70 458,70 478,105 458,140 258,140 278,105" fill="#059669"/>
+  <text x="296" y="96" class="n">2</text><text x="296" y="122" class="h">Generate</text>
+  <polygon points="486,70 686,70 706,105 686,140 486,140 506,105" fill="#C74634"/>
+  <text x="524" y="96" class="n">3</text><text x="524" y="122" class="h">Load</text>
+  <polygon points="714,70 930,70 930,140 714,140 734,105" fill="#475569"/>
+  <text x="752" y="96" class="n">4</text><text x="752" y="122" class="h">Verify</text>
+
+  <text x="40"  y="166" class="m">pqora.py /data/sales/</text>
+  <text x="40"  y="186" class="s">rows, row groups, types, codecs,</text>
+  <text x="40"  y="202" class="s">load balance per parallel degree</text>
+
+  <text x="276" y="166" class="m">pqora.py generate /data/sales/</text>
+  <text x="276" y="182" class="m">  --table SALES --sample-size all</text>
+  <text x="276" y="202" class="s">parts, DDL, manifest, wrapper</text>
+
+  <text x="504" y="166" class="m">sqlplus @sales.sql</text>
+  <text x="504" y="186" class="s">creates tables, parallel</text>
+  <text x="504" y="202" class="s">direct-path INSERT, COMMIT</text>
+
+  <text x="732" y="166" class="m">(end of sales.sql)</text>
+  <text x="732" y="186" class="s">row counts vs manifest,</text>
+  <text x="732" y="202" class="s">per file / part / column</text>
+
+  <!-- resize loop -->
+  <path d="M822,212 C822,262 596,262 596,214" stroke="#D97706" stroke-width="2" fill="none" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+  <rect x="560" y="248" width="325" height="24" rx="12" fill="#FFFBEB" stroke="#D97706"/>
+  <text x="582" y="265" font-size="12" fill="#92400E">value too large? <tspan font-family="Consolas, 'DejaVu Sans Mono', monospace">resize --auto-field-size-fix</tspan></text>
+</svg>

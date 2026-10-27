@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" width="960" height="420" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <style>
+      .t  { font-size: 22px; font-weight: 700; fill: #0F172A; }
+      .st { font-size: 13px; fill: #64748B; }
+      .n  { font-size: 12px; font-weight: 700; fill: #FFFFFF; }
+      .h  { font-size: 14px; font-weight: 700; }
+      .s  { font-size: 11.5px; fill: #475569; }
+      .m  { font-family: Consolas, 'DejaVu Sans Mono', monospace; font-size: 15px; fill: #0F172A; }
+      .lb { font-size: 11px; fill: #475569; }
+      .ln { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+    </style>
+  </defs>
+  <rect width="960" height="420" rx="16" fill="#FFFFFF"/>
+  <text x="30" y="42" class="t">Inside one parallel worker</text>
+  <text x="30" y="64" class="st">Oracle starts pqora with one argument, the part file. From there the work is vectorized Arrow code, with no per-row Python loop.</text>
+
+  <!-- steps: x = 30 + i*152, w = 136 -->
+  <g>
+    <rect x="30" y="88" width="136" height="118" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.4"/>
+    <circle cx="52" cy="110" r="12" fill="#059669"/><text x="52" y="114" class="n" text-anchor="middle">1</text>
+    <text x="70" y="115" class="h" fill="#065F46">Read part</text>
+    <text x="42" y="142" class="s">.pqpart JSON:</text>
+    <text x="42" y="160" class="s">row groups, column</text>
+    <text x="42" y="178" class="s">specs, options</text>
+  </g>
+  <path d="M166,147 L180,147" class="ln"/>
+  <g>
+    <rect x="182" y="88" width="136" height="118" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.4"/>
+    <circle cx="204" cy="110" r="12" fill="#059669"/><text x="204" y="114" class="n" text-anchor="middle">2</text>
+    <text x="222" y="115" class="h" fill="#065F46">Validate</text>
+    <text x="194" y="142" class="s">file size and row</text>
+    <text x="194" y="160" class="s">counts must match</text>
+    <text x="194" y="178" class="s">what generate saw</text>
+  </g>
+  <path d="M318,147 L332,147" class="ln"/>
+  <g>
+    <rect x="334" y="88" width="136" height="118" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.4"/>
+    <circle cx="356" cy="110" r="12" fill="#059669"/><text x="356" y="114" class="n" text-anchor="middle">3</text>
+    <text x="374" y="115" class="h" fill="#065F46">Read</text>
+    <text x="346" y="142" class="s">large coalesced,</text>
+    <text x="346" y="160" class="s">concurrent reads</text>
+    <text x="346" y="178" class="s">(made for NFS)</text>
+  </g>
+  <path d="M470,147 L484,147" class="ln"/>
+  <g>
+    <rect x="486" y="88" width="136" height="118" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.4"/>
+    <circle cx="508" cy="110" r="12" fill="#059669"/><text x="508" y="114" class="n" text-anchor="middle">4</text>
+    <text x="526" y="115" class="h" fill="#065F46">Decode</text>
+    <text x="498" y="142" class="s">pyarrow C++,</text>
+    <text x="498" y="160" class="s">N threads per</text>
+    <text x="498" y="178" class="s">process</text>
+  </g>
+  <path d="M622,147 L636,147" class="ln"/>
+  <g>
+    <rect x="638" y="88" width="136" height="118" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.4"/>
+    <circle cx="660" cy="110" r="12" fill="#059669"/><text x="660" y="114" class="n" text-anchor="middle">5</text>
+    <text x="678" y="115" class="h" fill="#065F46">Encode</text>
+    <text x="650" y="142" class="s">whole columns at</text>
+    <text x="650" y="160" class="s">once into length-</text>
+    <text x="650" y="178" class="s">prefixed records</text>
+  </g>
+  <path d="M774,147 L788,147" class="ln"/>
+  <g>
+    <rect x="790" y="88" width="140" height="118" rx="10" fill="#FFF8F6" stroke="#C74634" stroke-width="1.4"/>
+    <circle cx="812" cy="110" r="12" fill="#C74634"/><text x="812" y="114" class="n" text-anchor="middle">6</text>
+    <text x="830" y="115" class="h" fill="#7F1D1D">Oracle</text>
+    <text x="802" y="142" class="s">ORACLE_LOADER</text>
+    <text x="802" y="160" class="s">parses stdout,</text>
+    <text x="802" y="178" class="s">direct-path insert</text>
+  </g>
+  <text x="400" y="232" font-size="12" fill="#065F46" text-anchor="middle">pqora (Python + pyarrow)</text>
+  <line x1="30" y1="218" x2="774" y2="218" stroke="#059669" stroke-width="2"/>
+  <text x="860" y="232" font-size="12" fill="#7F1D1D" text-anchor="middle">Oracle</text>
+  <line x1="790" y1="218" x2="930" y2="218" stroke="#C74634" stroke-width="2"/>
+
+  <!-- record anatomy -->
+  <text x="30" y="272" font-size="15" font-weight="700" fill="#0F172A">A record on the wire</text>
+  <text x="212" y="272" class="st">(ID = 1, NAME = 'héllo', TS = NULL)</text>
+
+  <rect x="30"  y="286" width="112" height="36" rx="4" fill="#E2E8F0"/>
+  <text x="86"  y="309" class="m" text-anchor="middle">0000000042</text>
+  <rect x="146" y="286" width="34" height="36" rx="4" fill="#FDE68A"/>
+  <text x="163" y="309" class="m" text-anchor="middle">01</text>
+  <rect x="184" y="286" width="30" height="36" rx="4" fill="#BBF7D0"/>
+  <text x="199" y="309" class="m" text-anchor="middle">1</text>
+  <rect x="218" y="286" width="34" height="36" rx="4" fill="#FDE68A"/>
+  <text x="235" y="309" class="m" text-anchor="middle">06</text>
+  <rect x="256" y="286" width="66" height="36" rx="4" fill="#BBF7D0"/>
+  <text x="289" y="309" class="m" text-anchor="middle">héllo</text>
+  <rect x="326" y="286" width="250" height="36" rx="4" fill="#F1F5F9" stroke="#CBD5E1" stroke-dasharray="4 3"/>
+  <text x="451" y="309" class="m" fill="#94A3B8" text-anchor="middle">29 blanks</text>
+
+  <text x="86"  y="340" class="lb" text-anchor="middle">record length</text>
+  <text x="163" y="340" class="lb" text-anchor="middle">len</text>
+  <text x="199" y="340" class="lb" text-anchor="middle">ID</text>
+  <text x="235" y="340" class="lb" text-anchor="middle">len</text>
+  <text x="289" y="340" class="lb" text-anchor="middle">NAME (UTF-8)</text>
+  <text x="451" y="340" class="lb" text-anchor="middle">TS: fixed-width timestamp, blanks = NULL</text>
+
+  <g font-size="12.5" fill="#334155">
+    <text x="610" y="282">✓ no delimiters, no quoting, no escaping</text>
+    <text x="610" y="304">✓ binary values sent raw, not as hex</text>
+    <text x="610" y="326">✓ newlines, NUL bytes, emoji pass as-is</text>
+    <text x="610" y="348">✓ NULL and empty LOB kept apart</text>
+  </g>
+  <text x="30" y="390" class="st">One write per batch: the output is the values buffer of an Arrow array built with binary_join_element_wise.</text>
+</svg>

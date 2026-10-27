@@ -13,6 +13,8 @@ read and parallelizes by row group.
 Runs on **Python 3.6+ with pyarrow 6.0.1+ and numpy** (the Oracle Database
 Appliance with Oracle Linux 7 is the reference target).
 
+New here? **[Why pqora](docs/WHY_PQORA.md)** explains what it does and why it is fast, with diagrams.
+
 ## How it works in one picture
 
 ```
@@ -74,6 +76,7 @@ manifest and the sampling results as tables.
 
 | Document | For |
 |---|---|
+| [docs/WHY_PQORA.md](docs/WHY_PQORA.md) | Overview with diagrams: parallelism, RAC, exactness, safety checks |
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Setup, workflow, all options, generated files, type mapping, dates, large records, tuning, logs, troubleshooting |
 | [docs/DEVELOPER.md](docs/DEVELOPER.md) | Architecture, code map, data structures and file formats, stream format, pipelines, testing, release |
 | [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) | Why it is built this way; verified Oracle / pyarrow behaviours; open questions |

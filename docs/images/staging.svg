@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="960" height="400" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#475569"/></marker>
+    <style>
+      .t  { font-size: 22px; font-weight: 700; fill: #0F172A; }
+      .st { font-size: 13px; fill: #64748B; }
+      .h  { font-size: 14px; font-weight: 700; }
+      .s  { font-size: 11.5px; fill: #475569; }
+      .m  { font-family: Consolas, 'DejaVu Sans Mono', monospace; font-size: 12px; fill: #0F172A; }
+      .ln { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+    </style>
+  </defs>
+  <rect width="960" height="400" rx="16" fill="#FFFFFF"/>
+  <text x="30" y="42" class="t">Large values don't slow down the bulk load</text>
+  <text x="30" y="64" class="st">--stage-large-records keeps LOB columns out of the main table and sends the rare huge record to a side table.</text>
+
+  <!-- source -->
+  <rect x="30" y="160" width="170" height="80" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.4"/>
+  <text x="115" y="190" class="h" fill="#065F46" text-anchor="middle">pqora stream</text>
+  <text x="115" y="210" class="s" text-anchor="middle">every part, in parallel</text>
+  <path d="M200,200 L248,200" class="ln"/>
+
+  <!-- decision -->
+  <polygon points="335,140 425,200 335,260 245,200" fill="#FFFBEB" stroke="#D97706" stroke-width="1.4"/>
+  <text x="335" y="195" font-size="12.5" font-weight="700" fill="#92400E" text-anchor="middle">any value</text>
+  <text x="335" y="212" font-size="12.5" font-weight="700" fill="#92400E" text-anchor="middle">too large?</text>
+
+  <!-- fast path -->
+  <path d="M335,140 L335,120 L655,120" class="ln"/>
+  <text x="360" y="112" font-size="12.5" font-weight="600" fill="#059669">no: almost every record</text>
+  <rect x="660" y="88" width="270" height="72" rx="10" fill="#C74634"/>
+  <text x="680" y="114" class="h" fill="#FFFFFF">SALES</text>
+  <text x="680" y="134" font-size="11.5" fill="#FFE4DE">VARCHAR2 / RAW only, no LOB columns</text>
+  <text x="680" y="150" font-size="11.5" fill="#FFE4DE">full-speed parallel direct-path insert</text>
+
+  <!-- slow path -->
+  <path d="M335,260 L335,290 L375,290" class="ln"/>
+  <text x="345" y="312" font-size="12.5" font-weight="600" fill="#B45309">yes</text>
+  <rect x="380" y="262" width="170" height="56" rx="8" fill="#F8FAFC" stroke="#94A3B8"/>
+  <text x="465" y="286" class="m" text-anchor="middle">sales_clob_NNNN.dat</text>
+  <text x="465" y="304" class="s" text-anchor="middle">side file per part</text>
+  <path d="M550,290 L655,290" class="ln"/>
+  <text x="602" y="282" font-size="10.5" fill="#475569" text-anchor="middle">EXT_SALES_CLOB</text>
+  <rect x="660" y="254" width="270" height="72" rx="10" fill="#FFF8F6" stroke="#C74634" stroke-width="1.4"/>
+  <text x="680" y="280" class="h" fill="#7F1D1D">SALES_CLOB</text>
+  <text x="680" y="300" class="s">same columns as CLOB / BLOB</text>
+  <text x="680" y="316" class="s">only the rare large records</text>
+
+  <!-- check -->
+  <rect x="652" y="190" width="286" height="34" rx="17" fill="#ECFDF5" stroke="#059669"/>
+  <text x="795" y="212" font-size="11.5" font-weight="700" fill="#065F46" text-anchor="middle">✓ SALES + SALES_CLOB = expected rows</text>
+
+  <text x="30" y="370" class="st">Side files are written under a temporary name and renamed when the part completes, so interrupted reads never leave half-written data.</text>
+</svg>
