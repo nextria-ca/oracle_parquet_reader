@@ -203,7 +203,8 @@ written since the `resize` command exists; otherwise rerun `generate` once).
 | `<table>_sample_cache.json` | out-dir | generate with `--sample-size` | Sampling results per sample size (section 8). Delete it to force sampling again. |
 | `pqora.sh` | exec-dir | generate | `exec <python> <pqora.py> "$1"` (+ `PYTHONPATH`). Not rewritten if unchanged. |
 | `<table>_stream.log` | log-dir | stream mode | One JSON line per part start/end (section 12). |
-| `<ext>_<n>_<pid>.log` / `.bad` | log-dir | Oracle | ORACLE_LOADER log and bad files. |
+| `<ext>_<n>_<pid>.log` | log-dir | Oracle | ORACLE_LOADER log files. |
+| `<ext>.<n>_<pid>.bad` | log-dir | Oracle | Rejected records (same format as the stream), read by `EXT_<table>_BAD`. The dot after the table name makes `<ext>.*.bad` match only this table. |
 | `<table>_clob_NNNN.dat` | log-dir | stream mode (staged) | Large records, read by `EXT_<table>_CLOB`. |
 
 Part files are named `<table>_<number>`; regenerating a table removes only its
@@ -217,11 +218,18 @@ In order:
 3. **One-line staging CTAS**: `CREATE TABLE <table>_STG COMPRESS FOR QUERY HIGH PARALLEL n AS SELECT * FROM EXT_<table>;` (run after the external table exists; Hybrid Columnar Compression needs supported storage). Staged mode adds `<table>_CLOB_STG`.
 4. `CREATE TABLE EXT_<table> … ORGANIZATION EXTERNAL (TYPE ORACLE_LOADER … PREPROCESSOR … LOCATION (parts, largest first)) REJECT LIMIT 0 PARALLEL n;` - every column has a comment explaining its source, type and size decision.
 5. Staged mode: `CREATE TABLE EXT_<table>_CLOB …` (no preprocessor, reads the large-record files).
-6. `CREATE TABLE <table> (…)` (and `<table>_CLOB`).
-7. `ALTER SESSION ENABLE PARALLEL DML; INSERT /*+ APPEND PARALLEL(n) */ … ; COMMIT;` (and the `_CLOB` INSERT).
-8. Row count check: loaded vs expected (main + large in staged mode).
-9. **Verification queries** reading `<table>_manifest.json` with `JSON_TABLE(TO_BLOB(BFILENAME(...)))`: overview (expected vs loaded rows, parts, columns, READSIZE, version), rows per source file, per part, column list. When `generate` sampled, also queries reading `<table>_sample_cache.json`: one row per cached sample size (when, row groups, rows, MiB, seconds, threads), the result per column and sample size (max bytes and the counts ≤ 4000 / ≤ 32767 / > 32767), and the per row group detail.
-10. **Source file report** as comments (the full inspect output at generate time).
+6. **Rejected rows**: a commented `ALTER TABLE EXT_<table> REJECT LIMIT UNLIMITED`
+   (load past bad rows; they go to bad files), `CREATE TABLE EXT_<table>_BAD`
+   (same columns, no preprocessor, reads `LOCATION ('<ext>.*.bad')` in the log
+   directory, `REJECT LIMIT UNLIMITED`) and a commented
+   `INSERT /*+ APPEND */ INTO <table> SELECT * FROM EXT_<table>_BAD` to
+   reprocess them after fixing the cause (section 13). Delete the bad files
+   afterwards so they aren't loaded twice.
+7. `CREATE TABLE <table> (…)` (and `<table>_CLOB`).
+8. `ALTER SESSION ENABLE PARALLEL DML; INSERT /*+ APPEND PARALLEL(n) */ … ; COMMIT;` (and the `_CLOB` INSERT).
+9. Row count check: loaded vs expected (main + large in staged mode).
+10. **Verification queries** reading `<table>_manifest.json` with `JSON_TABLE(TO_BLOB(BFILENAME(...)))`: overview (expected vs loaded rows, parts, columns, READSIZE, version), rows per source file, per part, column list. When `generate` sampled, also queries reading `<table>_sample_cache.json`: one row per cached sample size (when, row groups, rows, MiB, seconds, threads), the result per column and sample size (max bytes and the counts ≤ 4000 / ≤ 32767 / > 32767), and the per row group detail.
+11. **Source file report** as comments (the full inspect output at generate time).
 
 Running the whole file in sqlplus works; statements that need a privilege or
 feature you don't have (RESUMABLE, HCC) fail without affecting the rest.
@@ -442,6 +450,8 @@ disabled") are normal - parallelism comes from multiple parts.
 | `ORA-64307` on the `_STG` CTAS | storage doesn't support HCC | remove `COMPRESS FOR QUERY HIGH` |
 | `ORA-01031` on `ENABLE RESUMABLE` | missing RESUMABLE privilege | `GRANT RESUMABLE TO <schema>` or ignore |
 | Load slow, high load average | NFS waits | `--pre-buffer`, `--threads`, check mount options, `--stage-large-records` |
+| Some rows rejected by Oracle (e.g. `ORA-12899`, conversion errors) and you want the rest loaded | `REJECT LIMIT 0` stops at the first one | `ALTER TABLE EXT_<table> REJECT LIMIT UNLIMITED`, load, fix the cause (e.g. `resize` + `<table>_alter.sql`, which also recreates `EXT_<table>_BAD`), `INSERT … SELECT * FROM EXT_<table>_BAD`, delete the `<ext>.*.bad` files |
+| `KUP-04040 … <ext>.*.bad not found` / `KUP-05002` | no bad files (nothing rejected) | nothing to reprocess |
 
 ## 14. Known limits
 

@@ -103,7 +103,7 @@ Sections in file order (search for the `# ----` headers):
 | column specs | `Namer`, `scalar_spec`, `build_specs`, `nice_size`, `band_note`, `field_layout`, `field_max_bytes` | Schema → list of column spec dicts |
 | stream mode: encoding | `to_text`, `fixed_text`, `fix_dates`, `date_ints`, `date_problems`, `prepare`, `large_mask`, `assemble`, `records_buffer`, `check_source`, `stream_part`, `run_stream`, `Oversize` | The preprocessor |
 | verify mode | `Decoder`, `run_verify` | Incremental decoder of the record format |
-| generate mode | `plan_parts`, `table_part_files`, `ddl_*`, `write_ddl`, `write_alter`, `wrapper_text`, `wrapper_state` | DDL text generation |
+| generate mode | `plan_parts`, `table_part_files`, `ddl_*` (incl. `ddl_bad`, `bad_file_pattern`), `write_ddl`, `write_alter`, `wrapper_text`, `wrapper_state` | DDL text generation |
 | column size changes | `parse_field_size`, `find_spec`, `scan_logs`, `apply_size_changes`, `grow_readsize` | `--field-size`, `--auto-field-size-fix` |
 | generate / resize | `date_check`, `_scan_dates`, `parquet_per_day`, `date_note`, `apply_column_type`, `is_interval_like`, `stage_main_specs`, `stage_settings`, `run_generate`, `write_manifest`, `run_resize` | Orchestration |
 | main | `main`, `is_part_file` | Mode dispatch and argparse |
@@ -212,7 +212,8 @@ line, failures to write are ignored).
 ORACLE_LOADER access parameters (from `ddl_external`):
 ```
 RECORDS VARIABLE 10  CHARACTERSET AL32UTF8  STRING SIZES ARE IN BYTES
-PREPROCESSOR <exec_obj>:'pqora.sh'  READSIZE <n>  BADFILE …  LOGFILE …
+PREPROCESSOR <exec_obj>:'pqora.sh'  READSIZE <n>
+BADFILE <log_obj>:'<ext>.%a_%p.bad'  LOGFILE <log_obj>:'<ext>_%a_%p.log'
 FIELDS ( … )
 ```
 Record = `LLLLLLLLLL` (10 ASCII digits, byte length of the rest) + fields in
@@ -276,7 +277,17 @@ without statistics, the row group is read (`_scan_dates`) and values are
 counted (`date_problems`). Results feed the column note, `is_interval_like`
 (min ≥ 0000-01-01 and max ≤ 0001-12-31), the generate output and the manifest.
 
-### 6.4 Staged mode in stream (`stream_part`)
+### 6.4 Bad files (`ddl_bad`)
+ORACLE_LOADER writes rejected records to the bad file unchanged, i.e. in the
+stream format (verified, including LOB indicators). `EXT_<table>_BAD` uses the
+same column specs and field list as `EXT_<table>` without the preprocessor,
+`DEFAULT DIRECTORY` = log object, `LOCATION ('<ext>.*.bad')` (wildcard) and
+`REJECT LIMIT UNLIMITED`; its own bad/log files are `<ext>_bad.*` so they
+don't match. `resize` regenerates it with the new sizes. The reprocessing
+INSERT is written commented out: running the whole `.sql` must never load old
+bad rows a second time.
+
+### 6.5 Staged mode in stream (`stream_part`)
 `large_mask`: OR over text/raw specs of `binary_length > max`. Large rows are
 filtered out of every prepared column, assembled with the stage specs (all
 LOB, same field order) and written to the stage file; the rest are assembled
@@ -324,7 +335,7 @@ staged union check, parallelism and timings per DOP, ROWNUM early stop,
 changed-file refusal, calendar-gap refusal, null/clamp exact values,
 HCC CTAS probe, cleanup. Output: `work/pqora_report_<host>_<time>.tar.gz`
 (`summary.txt` + every sqlplus output, logs, DDL; no password). Locally it
-reports 39 checks.
+reports 42 checks.
 
 Typical local run (database in a Docker container, `/opt/bigdata` mounted at
 the same path inside):

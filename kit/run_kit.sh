@@ -33,7 +33,7 @@ SQL_TIMEOUT="${SQL_TIMEOUT:-1800}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 REP="$WORK/report"
 SUMMARY="$REP/summary.txt"
-TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_GAPNULL PQK_GAPCLAMP PQK_ERR PQK_STAGE PQK_STAGE_CLOB PQK_INTERVAL PQK_INTNOSTATS PQK_INTTEXT"
+TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_GAPNULL PQK_GAPCLAMP PQK_ERR PQK_STAGE PQK_STAGE_CLOB PQK_REJECT PQK_REJECT_BAD PQK_INTERVAL PQK_INTNOSTATS PQK_INTTEXT"
 
 mkdir -p "$WORK"/{data,parts,exec,log,sql} "$REP" || exit 1
 chmod 755 "$WORK" "$WORK"/data "$WORK"/parts "$WORK"/exec
@@ -173,6 +173,8 @@ gen PQK_INTERVAL interval.parquet --dop 2 && gen PQK_INTNOSTATS interval_nostats
     && result PASS "generate PQK_INTERVAL / PQK_INTNOSTATS / PQK_INTTEXT" \
     || result FAIL "generate interval tables (see generate.out)"
 grep -E "^Dates|^Retyped|WARNING: .*min/max" "$REP/generate.out" | sort -u | sed 's/^/INFO  /' | tee -a "$SUMMARY"
+gen PQK_REJECT types.parquet --dop 4 && result PASS "generate PQK_REJECT" \
+    || result FAIL "generate PQK_REJECT (see generate.out)"
 if gen PQK_STAGE types.parquet --dop 4 --stage-large-records; then
     result PASS "generate PQK_STAGE (--stage-large-records)"
 else
@@ -294,6 +296,34 @@ else
     result FAIL "create+load PQK_STAGE: main/large/expected = '${counts:-?}' (see load_pqk_stage.out)"
 fi
 
+# rejected rows: EXT_PQK_REJECT gets a column too small for its values (Oracle rejects those rows
+# into bad files), the load runs with REJECT LIMIT UNLIMITED, then EXT_PQK_REJECT_BAD reprocesses them
+"$PY" - "$WORK/parts/pqk_reject.sql" "$WORK/sql/pqk_reject_run.sql" <<'PYEOF' >> "$REP/generate.out" 2>&1
+import sys
+s = open(sys.argv[1]).read()
+head, rest = s.split('CREATE TABLE "EXT_PQK_REJECT" (', 1)
+block, tail = rest.split("REJECT LIMIT 0", 1)
+import re
+block = re.sub(r'("S_DICT" +)VARCHAR2\(\d+ BYTE\)', r'\1VARCHAR2(2 BYTE)', block, count=1)
+s = head + 'CREATE TABLE "EXT_PQK_REJECT" (' + block + "REJECT LIMIT UNLIMITED" + tail
+s = "\n".join(l for l in s.split("\n") if "ENABLE RESUMABLE" not in l and "COMPRESS FOR QUERY HIGH" not in l)
+open(sys.argv[2], "w").write(s)
+PYEOF
+run_sql load_pqk_reject < "$WORK/sql/pqk_reject_run.sql"
+run_sql reprocess_pqk_reject <<'EOF'
+SELECT 'BAD ROWS|' || COUNT(*) FROM "EXT_PQK_REJECT_BAD";
+INSERT /*+ APPEND */ INTO "PQK_REJECT" SELECT * FROM "EXT_PQK_REJECT_BAD";
+COMMIT;
+SELECT 'TOTAL|' || COUNT(*) || '|' || COUNT(DISTINCT "ID") FROM "PQK_REJECT";
+EOF
+bad="$(sed -n 's/^BAD ROWS|//p' "$REP/reprocess_pqk_reject.out" | tail -1)"
+tot="$(sed -n 's/^TOTAL|//p' "$REP/reprocess_pqk_reject.out" | tail -1)"
+if [ -n "$bad" ] && [ "$bad" -gt 0 ] && [ "$tot" = "20000|20000" ]; then
+    result PASS "rejected rows: $bad read back from bad files via EXT_PQK_REJECT_BAD; table complete ($tot)"
+else
+    result FAIL "rejected rows: bad='$bad' total='$tot' $(errors "$REP/reprocess_pqk_reject.out" | head -1)"
+fi
+
 # the one-line compressed staging CTAS at the top of <table>.sql
 grep '_STG" COMPRESS FOR QUERY HIGH' "$WORK/parts/pqk_big.sql" | run_sql ctas_stg
 out="$REP/ctas_stg.out"
@@ -353,6 +383,7 @@ check types_ext_nls PQK_TYPES EXT_PQK_TYPES 4 \
 check interval PQK_INTERVAL PQK_INTERVAL 2
 check interval_nostats PQK_INTNOSTATS PQK_INTNOSTATS 2
 check interval_text PQK_INTTEXT PQK_INTTEXT 2
+check reject_reprocessed PQK_REJECT PQK_REJECT 4
 
 # staged table: PQK_STAGE UNION ALL PQK_STAGE_CLOB must equal the source exactly
 SP="$(ls "$WORK"/parts/pqk_stage_*.pqpart | head -1)"

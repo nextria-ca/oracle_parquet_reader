@@ -89,6 +89,8 @@ Python. The stream path is `prepare` (convert each column once) + `assemble`
 | `ALTER SESSION ENABLE RESUMABLE` needs the RESUMABLE privilege (`ORA-01031`) | Convenience line; kit skips it |
 | SQL*Plus does not prompt for `&` inside standalone `--` comment lines | Inspect report and notes can be embedded as comments |
 | ORACLE_LOADER log names: `<ext>_<3 digits>_<pid>.log` | Log scanning matches this exactly (so `EXT_SALES` doesn't read `EXT_SALES_EU`'s logs) |
+| Rejected records are written to the bad file in the original record format (the preprocessor's output, LOB indicators included) | `EXT_<table>_BAD` reads them with the same field list; verified by rejecting 14,222 of 20,000 rows and reloading them exactly |
+| `LOCATION` accepts wildcards (`'ext_sales.*.bad'`); no match → `KUP-04040` + `KUP-05002` | Bad file names `<ext>.%a_%p.bad`: the dot makes the pattern unique per table |
 
 ## Verified pyarrow 6.0.1 behaviours
 

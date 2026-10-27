@@ -36,7 +36,7 @@ Start with `README.md`, then:
 - Version: `VERSION` in `pqora.py`; bump it when shipping a new kit.
 - After changes: `pyflakes`, `vermin`, offline `generate` + `verify`, and the
   full kit against a database (DEVELOPER.md section 7). The kit currently
-  reports 39 checks; all must pass.
+  reports 42 checks; all must pass.
 - Keep docs in sync: options table in USER_GUIDE.md section 4.2, column spec
   keys and file formats in DEVELOPER.md section 4, verified behaviours in
   DESIGN_NOTES.md.

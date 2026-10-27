@@ -1512,7 +1512,12 @@ def ddl_header(st, title):
     return L
 
 
-def ddl_external(st, specs, preprocessor=True):
+def bad_file_pattern(ext):
+    """Wildcard matching exactly this external table's bad files."""
+    return "{}.*.bad".format(ext.lower())
+
+
+def ddl_external(st, specs, preprocessor=True, reject_limit="0"):
     ext = st["ext_table"]
     L = ["CREATE TABLE {} (".format(q(ext))]
     L.extend(column_lines(specs))
@@ -1528,7 +1533,7 @@ def ddl_external(st, specs, preprocessor=True):
         L.append("    PREPROCESSOR {}:'{}'".format(st["exec_dir_object"], st["wrapper_name"]))
     L += ["    READSIZE {}".format(st["readsize"])]
     if st.get("log_dir_object"):
-        L.append("    BADFILE {}:'{}_%a_%p.bad'".format(st["log_dir_object"], ext.lower()))
+        L.append("    BADFILE {}:'{}.%a_%p.bad'".format(st["log_dir_object"], ext.lower()))
         L.append("    LOGFILE {}:'{}_%a_%p.log'".format(st["log_dir_object"], ext.lower()))
     else:
         L += ["    NOBADFILE", "    NOLOGFILE"]
@@ -1539,8 +1544,34 @@ def ddl_external(st, specs, preprocessor=True):
     L += ["    )", "  )", "  LOCATION ("]
     for i, n in enumerate(st["location"]):
         L.append("    " + sql_str(n) + ("," if i < len(st["location"]) - 1 else ""))
-    L += ["  )", ")", "REJECT LIMIT 0", "PARALLEL {};".format(st["dop"])]
+    L += ["  )", ")", "REJECT LIMIT {}".format(reject_limit), "PARALLEL {};".format(st["dop"])]
     return L
+
+
+def ddl_bad(st, specs):
+    """External table over the main external table's bad files, and the
+    (commented) statements to reprocess rejected rows."""
+    if not st.get("log_dir_object"):
+        return []
+    ext, tgt = st["ext_table"], st["table"]
+    bad_ext = ext + "_BAD"
+    st2 = dict(st, ext_table=bad_ext, location=[bad_file_pattern(ext)],
+               parts_dir_object=st["log_dir_object"])
+    return ["-- " + "-" * 75,
+            "-- Rejected rows. EXT_* tables are created with REJECT LIMIT 0 (the first bad row",
+            "-- stops the load). To load past bad rows and collect them in bad files:",
+            "--   ALTER TABLE {} REJECT LIMIT UNLIMITED;".format(q(ext)),
+            "-- {} reads every {} file in {} (same record format,".format(
+                q(bad_ext), bad_file_pattern(ext), st["log_dir_object"]),
+            "-- no preprocessor; KUP-04040/KUP-05002 'no matching files' while there are none).",
+            "-- After fixing the cause (e.g. pqora.py resize), load them with the INSERT below;",
+            "-- then delete those bad files so they aren't loaded twice.",
+            "-- " + "-" * 75] \
+        + ddl_external(st2, specs, preprocessor=False, reject_limit="UNLIMITED") \
+        + ["",
+           "-- reprocess rejected rows (uncomment):",
+           "-- INSERT /*+ APPEND */ INTO {} SELECT * FROM {};".format(q(tgt), q(bad_ext)),
+           "-- COMMIT;"]
 
 
 def ddl_target(st, specs):
@@ -1736,6 +1767,9 @@ def write_ddl(st, specs):
     stage = st.get("stage")
     if stage:
         L += ddl_stage_external(st) + [""]
+    bad = ddl_bad(st, specs)
+    if bad:
+        L += bad + [""]
     L += ddl_target(st, specs) + [""]
     if stage:
         L += ddl_target(dict(st, table=stage["table"]), stage["columns"]) + [""]
