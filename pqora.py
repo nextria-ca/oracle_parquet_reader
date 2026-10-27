@@ -551,7 +551,8 @@ def measure(arr, path, maxes, bands):
 
 def sample_row_group(rg, cols, batch_rows, budget, pre_limit):
     """Measure one row group (up to `budget` bytes); own file handle, so it can
-    run in a worker thread. Returns ({path: max bytes}, {path: band counts}, rows)."""
+    run in a worker thread. Returns a detail record (JSON-serializable)."""
+    t0 = time.time()
     maxes, bands, rows, read = {}, {}, 0, 0
     pre = bool(pre_limit and rg.compressed <= pre_limit)
     pf = pq.ParquetFile(rg.file, buffer_size=0 if pre else 8 * MIB, pre_buffer=pre)
@@ -562,18 +563,40 @@ def sample_row_group(rg, cols, batch_rows, budget, pre_limit):
         read += batch.nbytes
         if read >= budget:
             break
+    return {"file": rg.file, "row_group": rg.index, "rows": rows, "rows_in_row_group": rg.rows,
+            "bytes": read, "seconds": round(time.time() - t0, 3), "pre_buffer": pre,
+            "columns": [{"path": list(k), "max": maxes[k], "bands": bands.get(k, [0, 0, 0])}
+                        for k in sorted(maxes)]}
+
+
+def combine_samples(details):
+    """({path tuple: max}, {path tuple: band counts}, rows) from row group records."""
+    maxes, bands, rows = {}, {}, 0
+    for d in details:
+        rows += d["rows"]
+        for c in d["columns"]:
+            k = tuple(c["path"])
+            maxes[k] = max(maxes.get(k, 0), c["max"])
+            acc = bands.setdefault(k, [0, 0, 0])
+            for i, n in enumerate(c["bands"]):
+                acc[i] += n
     return maxes, bands, rows
 
 
 def sample(files, schema, budget, columns, workers=1, pre_limit=0):
     """Read up to `budget` bytes spread evenly across all row groups (only the
     columns that need size estimation), `workers` row groups at a time.
-    Returns ({path: max bytes}, rows, {path: [count per Oracle size band]})."""
+    Returns a sample entry (JSON-serializable): settings, timing, one record
+    per row group and the combined result."""
     cols = [f.name for f in schema if needs_sampling(f.type)]
-    maxes, bands = {}, {}
-    if not cols:
-        return maxes, 0, bands
     rgs = [rg for f in files for rg in f.row_groups]
+    entry = {"sample_size": "all" if budget == float("inf") else int(budget), "columns": cols,
+             "created": datetime.datetime.now().isoformat(), "pqora_version": VERSION,
+             "threads": workers, "pre_buffer": pre_limit, "row_groups_total": len(rgs),
+             "row_groups_sampled": 0, "rows": 0, "bytes": 0, "seconds": 0.0, "row_groups": [],
+             "result": []}
+    if not cols or not rgs:
+        return entry
     total = sum(rg.uncompressed for rg in rgs)
     if budget >= total:
         chosen = rgs
@@ -585,25 +608,82 @@ def sample(files, schema, budget, columns, workers=1, pre_limit=0):
     sel_bytes = sum(c["uncompressed"] for p, c in columns.items() if p.split(".")[0] in cols)
     batch_rows = max(1, min(65536, int(BATCH_TARGET_BYTES / max(1.0, sel_bytes / float(total_rows)))))
     workers = max(1, min(workers, len(chosen)))
+    entry["threads"] = workers
     sys.stderr.write("  {} row group(s), {} thread(s)\n".format(len(chosen), workers))
-    rows, done, t0 = 0, 0, time.time()
+    details, rows, t0 = [], 0, time.time()
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(sample_row_group, rg, cols, batch_rows, per_rg, pre_limit)
                    for rg in chosen]
         for fut in concurrent.futures.as_completed(futures):
-            part_max, part_bands, part_rows = fut.result()
-            for k, v in part_max.items():
-                maxes[k] = max(maxes.get(k, 0), v)
-            for k, counts in part_bands.items():
-                acc = bands.setdefault(k, [0, 0, 0])
-                for i, c in enumerate(counts):
-                    acc[i] += c
-            rows += part_rows
-            done += 1
+            d = fut.result()
+            details.append(d)
+            rows += d["rows"]
+            done = len(details)
             if done == len(chosen) or done % max(1, len(chosen) // 20) == 0:
                 sys.stderr.write("  sampled {}/{} row groups ({:,} rows, {:.0f}s)\n".format(
                     done, len(chosen), rows, time.time() - t0))
-    return maxes, rows, bands
+    details.sort(key=lambda d: (natural_key(d["file"]), d["row_group"]))
+    maxes, bands, rows = combine_samples(details)
+    entry.update(row_groups_sampled=len(details), rows=rows, bytes=sum(d["bytes"] for d in details),
+                 seconds=round(time.time() - t0, 3), row_groups=details,
+                 result=[{"path": list(k), "max": maxes[k], "bands": bands.get(k, [0, 0, 0])}
+                         for k in sorted(maxes)])
+    return entry
+
+
+# ---------------------------------------------------------------------------
+# sample cache: <out-dir>/<table>_sample_cache.json, one entry per sample size
+# ---------------------------------------------------------------------------
+
+SAMPLE_CACHE_FORMAT = 1
+
+
+def sample_key(budget):
+    return "all" if budget == float("inf") else str(int(budget))
+
+
+def sample_fingerprint(files, schema):
+    """What a cached sample depends on: the files (path, size, rows per row
+    group) and the schema."""
+    return {"schema": hashlib.sha1(str(schema).encode("utf-8")).hexdigest(),
+            "files": [{"path": f.path, "size": f.disk_size,
+                       "row_group_rows": [rg.rows for rg in f.row_groups]} for f in files]}
+
+
+def read_sample_cache(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cache = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return cache if cache.get("pqora_sample_cache") == SAMPLE_CACHE_FORMAT else {}
+
+
+def cached_sample(path, key, fingerprint):
+    """The cached entry for this sample size, or None (with the reason on stderr)."""
+    entry = read_sample_cache(path).get("entries", {}).get(key)
+    if entry is None:
+        return None
+    if entry.get("fingerprint") != fingerprint:
+        sys.stderr.write("  sample cache {}: entry '{}' was made from different files or schema; "
+                         "sampling again\n".format(path, key))
+        return None
+    return entry
+
+
+def write_sample_cache(path, key, entry):
+    """Add/replace one entry, keeping the others; atomic replace."""
+    cache = read_sample_cache(path) or {"pqora_sample_cache": SAMPLE_CACHE_FORMAT, "entries": {}}
+    cache.setdefault("entries", {})[key] = entry
+    cache["updated"] = datetime.datetime.now().isoformat()
+    tmp = "{}.tmp.{}".format(path, os.getpid())
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, indent=1)
+        os.rename(tmp, path)
+    except OSError as e:
+        warn("could not write the sample cache {}: {}".format(path, e))
+        discard(None, tmp)
 
 
 # ---------------------------------------------------------------------------
@@ -2088,14 +2168,29 @@ def run_generate(args):
     table = ident(args.table or namer.name((base,)), "--table")
     ext_table = ident(args.ext_table or ("EXT_" + table)[:args.max_name_len], "--ext-table")
 
-    maxes, bands, sampled = {}, {}, False
+    maxes, bands, sampled, sampling = {}, {}, False, None
     if args.sample_size:
-        sys.stderr.write("Sampling up to {} ...\n".format(
-            "all data" if args.sample_size == float("inf") else human(args.sample_size)))
-        maxes, nrows, bands = sample(files, schema, args.sample_size, columns,
-                                     args.multi_threaded_sampling, args.pre_buffer)
+        what = "all data" if args.sample_size == float("inf") else human(args.sample_size)
+        cache_file = os.path.join(out_dir, table.lower() + "_sample_cache.json")
+        key = sample_key(args.sample_size)
+        fingerprint = sample_fingerprint(files, schema)
+        entry = cached_sample(cache_file, key, fingerprint)
+        if entry is not None:
+            sampling = "cached: {} sample from {}, {} of {} row groups, {:,} rows, took {:.1f}s ({})".format(
+                what, entry["created"][:19], entry["row_groups_sampled"], entry["row_groups_total"],
+                entry["rows"], entry["seconds"], cache_file)
+            sys.stderr.write("Sampling {}: using the cache {}\n".format(what, cache_file))
+        else:
+            sys.stderr.write("Sampling up to {} ...\n".format(what))
+            entry = sample(files, schema, args.sample_size, columns,
+                           args.multi_threaded_sampling, args.pre_buffer)
+            entry["fingerprint"] = fingerprint
+            write_sample_cache(cache_file, key, entry)
+            sampling = "{} sample, {} of {} row groups, {:,} rows, {} thread(s), {:.1f}s -> cached in {}".format(
+                what, entry["row_groups_sampled"], entry["row_groups_total"], entry["rows"],
+                entry["threads"], entry["seconds"], cache_file)
+        maxes, bands, _ = combine_samples([{"rows": entry["rows"], "columns": entry["result"]}])
         sampled = True
-        sys.stderr.write("  sampled {:,} rows\n".format(nrows))
 
     total_rows = sum(f.rows for f in files)
     column_avg = {}
@@ -2172,6 +2267,7 @@ def run_generate(args):
           "margin": args.margin, "readsize": readsize,
           "threads": args.threads, "pre_buffer": args.pre_buffer,
           "out_of_range_dates": args.out_of_range_dates,
+          "sampling": sampling,
           "files": [f.path for f in files], "total_rows": total_rows}
     report = io.StringIO()
     print_inspect(files, columns, DEFAULT_DOPS, False, args.target_size, report)
@@ -2264,6 +2360,8 @@ def run_generate(args):
                                              "  (unchanged)" if wstate == "same" else ""))
     print("Manifest : {}".format(manifest))
     print("READSIZE : {:,}".format(readsize))
+    if sampling:
+        print("Sampling : " + sampling)
     all_rgs = [rg for f in files for rg in f.row_groups]
     n_pre = sum(1 for rg in all_rgs if args.pre_buffer and rg.compressed <= args.pre_buffer)
     print("Reading  : {} thread(s) per part; pre-buffer {} of {} row group(s) (<= {}), "

@@ -98,7 +98,8 @@ Sections in file order (search for the `# ----` headers):
 | metadata | `RowGroup`, `FileInfo`, `read_file_info`, `load_files` | Footer reading; per-column aggregates |
 | inspect | `print_inspect`, `lpt_efficiency`, `compact_logical` | The report (also embedded in `<table>.sql`) |
 | arrow type helpers | `unwrap`, `is_text/binary/json_type/list_type`, `plain`, `struct_child`, `json_safe`, `to_json_array` | Type predicates; nested → JSON without Python datetimes |
-| sampling | `measure`, `_len_stats`, `sample_row_group`, `sample` | Max byte lengths + size-band counts, thread pool over row groups |
+| sampling | `measure`, `_len_stats`, `sample_row_group`, `combine_samples`, `sample` | Max byte lengths + size-band counts, thread pool over row groups; returns a JSON-serializable entry |
+| sample cache | `sample_key`, `sample_fingerprint`, `cached_sample`, `read_sample_cache`, `write_sample_cache` | `<table>_sample_cache.json`, one entry per sample size |
 | column specs | `Namer`, `scalar_spec`, `build_specs`, `nice_size`, `band_note`, `field_layout`, `field_max_bytes` | Schema → list of column spec dicts |
 | stream mode: encoding | `to_text`, `fixed_text`, `fix_dates`, `date_ints`, `date_problems`, `prepare`, `large_mask`, `assemble`, `records_buffer`, `check_source`, `stream_part`, `run_stream`, `Oversize` | The preprocessor |
 | verify mode | `Decoder`, `run_verify` | Incremental decoder of the record format |
@@ -167,7 +168,8 @@ Top level: `table`, `rows`, `readsize`, `pqora_version`, `generated`,
 - `settings`: everything needed to regenerate the DDL (`table`, `ext_table`,
   directory objects and paths, `wrapper_name`, `dop`, `max_string_size`,
   `max_readsize`, `margin`, `readsize`, `lob_max`, `threads`, `pre_buffer`,
-  `out_of_range_dates`, `files`, `total_rows`, `location` (LOCATION order),
+  `out_of_range_dates`, `sampling` (how the sizes were sampled or that the
+  cache was used), `files`, `total_rows`, `location` (LOCATION order),
   `inspect_report` (text), `stage` (staged mode: table names, readsize,
   columns, `location` of `.dat` files)).
 - `parts[]`: `name`, `rows`, `compressed`, `uncompressed`,
@@ -175,7 +177,31 @@ Top level: `table`, `rows`, `readsize`, `pqora_version`, `generated`,
 The verification queries in `<table>.sql` read `rows`, `parts`, `columns`
 and the nested `sources` with `JSON_TABLE`.
 
-### 4.4 Stream log line
+### 4.4 Sample cache (`<table>_sample_cache.json`)
+```json
+{
+ "pqora_sample_cache": 1, "updated": "…",
+ "entries": {
+  "all": {                                   // key: "all" or the byte budget, e.g. "524288000"
+   "sample_size": "all", "columns": ["name", "comment", …],   // top-level columns read
+   "created": "…", "pqora_version": "1.3", "threads": 16, "pre_buffer": 134217728,
+   "row_groups_total": 64, "row_groups_sampled": 64, "rows": 8000000, "bytes": 812345678, "seconds": 41.2,
+   "fingerprint": {"schema": "<sha1 of the Arrow schema text>",
+                   "files": [{"path": "…", "size": 123, "row_group_rows": [125000, …]}]},
+   "row_groups": [ {"file": "…", "row_group": 0, "rows": 125000, "rows_in_row_group": 125000,
+                    "bytes": 12693000, "seconds": 0.61, "pre_buffer": true,
+                    "columns": [{"path": ["comment"], "max": 9000, "bands": [124875, 125, 0]}]} ],
+   "result": [ {"path": ["comment"], "max": 9000, "bands": [7992000, 8000, 0]} ]
+  },
+  "524288000": { … }
+ }
+}
+```
+An entry is reused when its key matches `--sample-size` and its fingerprint
+matches the current files and schema; otherwise it is recomputed and replaced
+(other entries are kept). The file is written atomically (temp + rename).
+
+### 4.5 Stream log line
 See USER_GUIDE section 12. Written by `log_line` (append, one JSON object per
 line, failures to write are ignored).
 
@@ -216,7 +242,9 @@ output buffer is the values buffer of the resulting binary array
    - before touching any part file.
 2. `load_files`: footers of all inputs; one schema required.
 3. Table/ext names (`Namer`, `ident`).
-4. Optional `sample` (thread pool) → `maxes`, size `bands`.
+4. Optional sampling: `cached_sample` (same size, same fingerprint) or
+   `sample` (thread pool) + `write_sample_cache`; `combine_samples` →
+   `maxes`, size `bands`.
 5. `build_specs` (types, names, sizes, notes).
 6. `date_check` (statistics → flagged row groups → `_scan_dates` in threads),
    `--column-type` overrides and interval detection (`apply_column_type`),

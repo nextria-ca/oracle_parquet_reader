@@ -200,6 +200,7 @@ written since the `resize` command exists; otherwise rerun `generate` once).
 | `<table>.sql` | ddl-dir | generate, resize | All DDL and load statements (section 6). |
 | `<table>_alter.sql` | ddl-dir | resize | Recreates the external table and widens the target table. |
 | `<table>_manifest.json` | out-dir | generate, resize | Settings, columns, parts (with source files and row groups), date check, inspect report. |
+| `<table>_sample_cache.json` | out-dir | generate with `--sample-size` | Sampling results per sample size (section 8). Delete it to force sampling again. |
 | `pqora.sh` | exec-dir | generate | `exec <python> <pqora.py> "$1"` (+ `PYTHONPATH`). Not rewritten if unchanged. |
 | `<table>_stream.log` | log-dir | stream mode | One JSON line per part start/end (section 12). |
 | `<ext>_<n>_<pid>.log` / `.bad` | log-dir | Oracle | ORACLE_LOADER log and bad files. |
@@ -276,6 +277,21 @@ Oracle size boundaries:
 ```
 (binary columns use RAW's 2000/32767). Nothing above 32767 means the column
 could be a VARCHAR2 on a database with `MAX_STRING_SIZE=EXTENDED`.
+
+**Sample cache**: sampling can take long, so its outcome is stored in
+`<out-dir>/<table>_sample_cache.json`, one entry per sample size (`all`, or
+the byte budget such as `524288000`). A later `generate` with the same
+`--sample-size` uses the entry instead of reading the data; running first with
+`500MB` and later with `all` keeps both, and each is reused afterwards. An
+entry is used only if the input files and schema still match (paths, sizes,
+rows per row group); otherwise that size is sampled again automatically. To
+force a fresh sample, delete the cache file. Each entry records the sample
+size, row groups sampled of total, rows and bytes read, threads, pre-buffer,
+start time and seconds, one record per row group (rows, bytes, seconds, and
+per column the maximum and size-band counts) and the combined result.
+`generate` prints `Sampling : …` (sampled or cached), and the manifest's
+`settings.sampling` records it. `--margin` is applied after the cache, so
+changing it doesn't need a new sample.
 
 **A value larger than its column** stops the load with a message naming every
 oversize column of that part and its largest value:
