@@ -1479,6 +1479,58 @@ def ddl_stage_external(st):
         + ddl_external(st2, stage["columns"], preprocessor=False)
 
 
+def ddl_manifest(st):
+    """Queries reading <table>_manifest.json as tables, for verification."""
+    name = os.path.basename(manifest_path(st))
+    src = "TO_BLOB(BFILENAME({}, {})) FORMAT JSON".format(sql_str(st["parts_dir_object"]),
+                                                         sql_str(name))
+    tgt = q(st["table"])
+    stage = st.get("stage")
+    loaded = "(SELECT COUNT(*) FROM {})".format(tgt)
+    if stage:
+        loaded = "(SELECT COUNT(*) FROM {}) + (SELECT COUNT(*) FROM {})".format(tgt, q(stage["table"]))
+    return [
+        "-- " + "-" * 75,
+        "-- Verification: {} (in {}) read as tables".format(name, st["parts_dir_object"]),
+        "-- " + "-" * 75,
+        "",
+        "-- overview: rows expected by the manifest vs rows loaded",
+        "SELECT m.tbl, m.expected_rows, {} AS loaded_rows, m.parts, m.cols, m.readsize,".format(loaded),
+        "       m.generated, m.version",
+        "FROM JSON_TABLE({}, '$' COLUMNS (".format(src),
+        "       tbl VARCHAR2(128) PATH '$.table', expected_rows NUMBER PATH '$.rows',",
+        "       parts NUMBER PATH '$.parts.size()', cols NUMBER PATH '$.columns.size()',",
+        "       readsize NUMBER PATH '$.readsize', generated VARCHAR2(40) PATH '$.generated',",
+        "       version VARCHAR2(20) PATH '$.pqora_version')) m;",
+        "",
+        "-- per source file: parts, row groups and rows (TOTAL = whole table)",
+        "SELECT SUBSTR(NVL(f.file_path, 'TOTAL'), 1, 120) AS file_path, COUNT(DISTINCT f.part) AS parts,",
+        "       SUM(f.row_groups) AS row_groups, SUM(f.file_rows) AS file_rows",
+        "FROM JSON_TABLE({}, '$.parts[*]' COLUMNS (".format(src),
+        "       part VARCHAR2(200) PATH '$.name',",
+        "       NESTED PATH '$.sources[*]' COLUMNS (",
+        "         file_path VARCHAR2(4000) PATH '$.path',",
+        "         row_groups NUMBER PATH '$.row_groups.size()', file_rows NUMBER PATH '$.rows'))) f",
+        "GROUP BY ROLLUP(f.file_path)",
+        "ORDER BY f.file_path NULLS LAST;",
+        "",
+        "-- per part (one parallel work unit each)",
+        "SELECT p.part, p.part_rows, ROUND(p.compressed / 1048576, 1) AS compressed_mib,",
+        "       ROUND(p.uncompressed / 1048576, 1) AS uncompressed_mib, p.files",
+        "FROM JSON_TABLE({}, '$.parts[*]' COLUMNS (".format(src),
+        "       part VARCHAR2(200) PATH '$.name', part_rows NUMBER PATH '$.rows',",
+        "       compressed NUMBER PATH '$.compressed', uncompressed NUMBER PATH '$.uncompressed',",
+        "       files NUMBER PATH '$.sources.size()')) p",
+        "ORDER BY p.part;",
+        "",
+        "-- columns",
+        "SELECT c.column_name, c.kind, c.oracle_type, SUBSTR(c.note, 1, 120) AS note",
+        "FROM JSON_TABLE({}, '$.columns[*]' COLUMNS (".format(src),
+        "       column_name VARCHAR2(128) PATH '$.name', kind VARCHAR2(20) PATH '$.kind',",
+        "       oracle_type VARCHAR2(60) PATH '$.otype', note VARCHAR2(4000) PATH '$.note')) c;",
+    ]
+
+
 def write_ddl(st, specs):
     path = ddl_path(st)
     L = ddl_header(st, "Generated") + [""] + ddl_ctas(st) + [""] + ddl_external(st, specs) + [""]
@@ -1488,7 +1540,7 @@ def write_ddl(st, specs):
     L += ddl_target(st, specs) + [""]
     if stage:
         L += ddl_target(dict(st, table=stage["table"]), stage["columns"]) + [""]
-    write_lines(path, L + ddl_load(st) + report_comment(st))
+    write_lines(path, L + ddl_load(st) + ["", ""] + ddl_manifest(st) + report_comment(st))
     return path
 
 
@@ -1918,17 +1970,21 @@ def run_generate(args):
                              "columns": stg["columns"]}
         with open(os.path.join(out_dir, name), "w", encoding="utf-8") as fh:
             json.dump(part, fh, indent=1)
-        part_entries.append((name, rows, sum(rg.uncompressed for rg in rgs)))
+        part_entries.append((name, rows, sum(rg.uncompressed for rg in rgs), {
+            "name": name, "rows": rows,
+            "compressed": sum(rg.compressed for rg in rgs),
+            "uncompressed": sum(rg.uncompressed for rg in rgs),
+            "sources": [{"path": src["path"], "row_groups": src["row_groups"], "rows": sum(src["rg_rows"])}
+                        for src in sources]}))
 
     # biggest parts first in LOCATION so the long ones start early
-    st["location"] = [n for n, _, _ in sorted(part_entries, key=lambda e: -e[2])]
+    st["location"] = [e[0] for e in sorted(part_entries, key=lambda e: -e[2])]
     ddl_file = write_ddl(st, specs)
     if wstate == "write":
         with open(wrapper, "w", encoding="utf-8") as fh:
             fh.write(wtext)
         os.chmod(wrapper, 0o755)
-    manifest = write_manifest(st, specs, [{"name": n, "rows": r, "uncompressed": u}
-                                          for n, r, u in part_entries])
+    manifest = write_manifest(st, specs, [e[3] for e in part_entries])
 
     print("Parts    : {} x .pqpart in {}  ({:,} rows)".format(len(parts), out_dir, total_rows))
     print("DDL      : {}".format(ddl_file))
@@ -1965,6 +2021,7 @@ def write_manifest(st, specs, parts):
     path = manifest_path(st)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"table": st["table"], "rows": st["total_rows"], "readsize": st["readsize"],
+                   "pqora_version": VERSION, "generated": datetime.datetime.now().isoformat(),
                    "settings": st, "columns": specs, "parts": parts}, fh, indent=1)
     return path
 
