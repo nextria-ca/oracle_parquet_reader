@@ -33,7 +33,7 @@ SQL_TIMEOUT="${SQL_TIMEOUT:-1800}"
 STAMP="$(date +%Y%m%d_%H%M%S)"
 REP="$WORK/report"
 SUMMARY="$REP/summary.txt"
-TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_ERR PQK_STAGE PQK_STAGE_CLOB"
+TABLES="PQK_TYPES PQK_BIG PQK_BLOBS PQK_GAP PQK_GAPNULL PQK_GAPCLAMP PQK_ERR PQK_STAGE PQK_STAGE_CLOB"
 
 mkdir -p "$WORK"/{data,parts,exec,log,sql} "$REP" || exit 1
 chmod 755 "$WORK" "$WORK"/data "$WORK"/parts "$WORK"/exec
@@ -161,6 +161,12 @@ for spec in "PQK_TYPES types.parquet" "PQK_BIG big.parquet" "PQK_BLOBS blobs.par
     set -- $spec
     if gen "$1" "$2" --dop 8; then result PASS "generate $1"; else result FAIL "generate $1 (see generate.out)"; fi
 done
+for mode in null clamp; do
+    t="PQK_GAP$(echo $mode | tr 'a-z' 'A-Z')"
+    if gen "$t" gap.parquet --dop 2 --out-of-range-dates $mode; then result PASS "generate $t (--out-of-range-dates $mode)"
+    else result FAIL "generate $t (see generate.out)"; fi
+done
+grep -E "^Dates" "$REP/generate.out" | sort -u | sed 's/^/INFO  /' | tee -a "$SUMMARY"
 if gen PQK_STAGE types.parquet --dop 4 --stage-large-records; then
     result PASS "generate PQK_STAGE (--stage-large-records)"
 else
@@ -292,7 +298,7 @@ else
 fi
 
 # error-test tables: the external tables must exist; their INSERT is expected to fail
-for t in PQK_GAP PQK_ERR; do
+for t in PQK_GAP PQK_ERR PQK_GAPNULL PQK_GAPCLAMP; do
     lt="$(echo "$t" | tr 'A-Z' 'a-z')"
     grep -v -e '_STG" COMPRESS FOR QUERY HIGH' -e 'ENABLE RESUMABLE' "$WORK/parts/$lt.sql" | run_sql "create_$lt"
 done
@@ -397,6 +403,23 @@ if grep -q '1582-10-05' "$REP/error_calendar_gap.out"; then
 else
     result FAIL "calendar gap date was not refused (see error_calendar_gap.out)"
 fi
+
+# --out-of-range-dates null / clamp: exact values (rows: valid, 1582 gap, year 10000, year 0, NULL)
+exp_null="1582-10-15/1582-10-15 12:34:56.000000,NULL/NULL,NULL/NULL,NULL/NULL,NULL/NULL"
+exp_clamp="1582-10-15/1582-10-15 12:34:56.000000,1582-10-15/1582-10-15 12:34:56.000000,9999-12-31/9999-12-31 23:59:59.999999,0001-01-01/0001-01-01 00:00:00.000000,NULL/NULL"
+for mode in null clamp; do
+    t="PQK_GAP$(echo $mode | tr 'a-z' 'A-Z')"
+    printf '%s\n' "SELECT 'DATES|' || LISTAGG(NVL(TO_CHAR(\"D\", 'YYYY-MM-DD'), 'NULL') || '/' ||" \
+        "  NVL(TO_CHAR(\"TS\", 'YYYY-MM-DD HH24:MI:SS.FF6'), 'NULL'), ',') WITHIN GROUP (ORDER BY \"ID\")" \
+        "FROM \"EXT_$t\";" | run_sql "dates_$mode"
+    got="$(sed -n 's/^DATES|//p' "$REP/dates_$mode.out" | tail -1)"
+    if [ "$mode" = null ]; then exp="$exp_null"; else exp="$exp_clamp"; fi
+    if [ "$got" = "$exp" ]; then
+        result PASS "--out-of-range-dates $mode: values as expected"
+    else
+        result FAIL "--out-of-range-dates $mode: got '$got' expected '$exp' $(errors "$REP/dates_$mode.out" | head -1)"
+    fi
+done
 
 # ---------------------------------------------------------------- 11. cleanup
 if [ "$KEEP" != "1" ]; then

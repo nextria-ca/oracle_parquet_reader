@@ -200,12 +200,22 @@ def make_big(path, n, rg_rows=250000):
     return n
 
 
+GAP_ROWS = 5
+
+
 def make_gap(path):
-    """One valid row and one date inside the 1582 calendar gap (must be refused)."""
-    t = pa.table({"id": pa.array([1, 2], pa.int64()),
-                  "d": pa.array([datetime.date(1582, 10, 15), datetime.date(1582, 10, 10)], pa.date32())})
+    """Dates/timestamps Oracle can't store: one valid row, one in the 1582 calendar
+    gap, one after 9999, one before 0001, one NULL (built from day numbers, since
+    Python dates can't go past 9999)."""
+    days = [GAP_LAST + 1, GAP_FIRST + 5, (datetime.date(9999, 12, 31) - datetime.date(1970, 1, 1)).days + 1,
+            (datetime.date(1, 1, 1) - datetime.date(1970, 1, 1)).days - 3, None]
+    noon = (12 * 3600 + 34 * 60 + 56) * 10 ** 6
+    t = pa.table({"id": pa.array(range(1, GAP_ROWS + 1), pa.int64()),
+                  "d": pa.array(days, pa.date32()),
+                  "ts": pa.array([None if x is None else x * 86400 * 10 ** 6 + noon for x in days],
+                                 pa.timestamp("us"))})
     pq.write_table(t, path)
-    return 2
+    return GAP_ROWS
 
 
 def make_blobs(path, sizes_mb):

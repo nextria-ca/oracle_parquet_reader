@@ -60,6 +60,18 @@ the INSERT. `--field-size` and `--auto-field-size-fix` also work on `generate`.
 Sizes above the `VARCHAR2`/`RAW` limit become `CLOB`/`BLOB`, and READSIZE grows
 when needed. `--dry-run` shows the changes only.
 
+### Dates
+
+`generate` checks every date/timestamp column in every row group against what
+Oracle can store (0001-01-01 .. 9999-12-31, without 1582-10-05..14). It uses
+the Parquet min/max statistics and reads values only for row groups without
+usable statistics (e.g. INT96) or with a suspicious range, so it is usually
+free. Results go into the column comments, the manifest and the `generate`
+output. At load time `--out-of-range-dates` decides: `error` (default) fails
+the load, `null` loads NULL, `clamp` moves values to 0001-01-01 /
+9999-12-31 23:59:59.999999999 / 1582-10-15; the stream log counts changed
+values per column. `--no-date-check` skips the check.
+
 ### Large records (`--stage-large-records`)
 
 A single CLOB column in the external table slows the whole load down. With

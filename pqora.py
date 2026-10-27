@@ -798,6 +798,8 @@ UNITS_PER_DAY = {"s": 86400, "ms": 86400 * 10 ** 3, "us": 86400 * 10 ** 6, "ns":
 # 1582-10-05 .. 1582-10-14 don't exist there and would be silently shifted
 GAP_FIRST = (datetime.date(1582, 10, 5) - datetime.date(1970, 1, 1)).days
 GAP_LAST = (datetime.date(1582, 10, 14) - datetime.date(1970, 1, 1)).days
+DATE_LO = (datetime.date(1, 1, 1) - datetime.date(1970, 1, 1)).days       # Oracle 4-digit years
+DATE_HI = (datetime.date(9999, 12, 31) - datetime.date(1970, 1, 1)).days
 
 
 class StreamError(Exception):
@@ -866,24 +868,67 @@ def to_text(arr, spec):
     raise StreamError("unknown column kind " + k)
 
 
-def check_calendar_gap(arr, per_day, spec):
-    if len(arr) == 0 or arr.null_count == len(arr):
-        return
+def date_ints(arr):
+    """(int64 numpy values, bool numpy valid) of a date32/timestamp array."""
     ints = pc.cast(arr, pa.int32()) if pa.types.is_date32(arr.type) else pc.cast(arr, pa.int64())
     v = pc.fill_null(ints, 0).to_numpy(zero_copy_only=False).astype(np.int64)
+    valid = ~np.asarray(arr.is_null().to_numpy(zero_copy_only=False), dtype=bool)
+    return v, valid
+
+
+def date_problems(v, valid, per_day):
+    """Masks of values Oracle can't store: (too early, too late, in the 1582 gap)."""
     days = np.floor_divide(v, per_day)
-    bad = (days >= GAP_FIRST) & (days <= GAP_LAST) & ~np.asarray(
-        arr.is_null().to_numpy(zero_copy_only=False), dtype=bool)
-    if bad.any():
-        raise StreamError("column {}: {} value(s) between 1582-10-05 and 1582-10-14; these dates "
-                          "don't exist in Oracle's calendar and would be silently changed".format(
-                              spec["name"], int(bad.sum())))
+    low = valid & (days < DATE_LO)
+    high = valid & (days > DATE_HI)
+    gap = valid & (days >= GAP_FIRST) & (days <= GAP_LAST)
+    return days, low, high, gap
 
 
-def fixed_text(arr, spec):
+def date_examples(days, mask, n=3):
+    """First n flagged values as dates (any year; time of day not shown)."""
+    picked = days[np.nonzero(mask)[0][:n]]
+    return pc.cast(pa.array(picked.astype(np.int32), pa.int32()).cast(pa.date32()), pa.string()).to_pylist()
+
+
+def fix_dates(arr, spec, per_day, mode, fixes):
+    """Apply --out-of-range-dates: 'error' raises, 'null' blanks the values,
+    'clamp' moves them to the nearest date Oracle can store."""
+    if len(arr) == 0 or arr.null_count == len(arr):
+        return arr
+    v, valid = date_ints(arr)
+    days, low, high, gap = date_problems(v, valid, per_day)
+    bad = low | high | gap
+    n = int(bad.sum())
+    if not n:
+        return arr
+    name = spec["name"]
+    if mode == "error":
+        if gap.any():
+            raise StreamError("column {}: {} value(s) between 1582-10-05 and 1582-10-14; these dates "
+                              "don't exist in Oracle's calendar and would be silently changed (use "
+                              "--out-of-range-dates null or clamp)".format(name, int(gap.sum())))
+        raise StreamError("column {}: {} value(s) outside Oracle's range 0001-01-01..9999-12-31, e.g. {} "
+                          "(use --out-of-range-dates null or clamp)".format(
+                              name, int((low | high).sum()), date_examples(days, low | high)))
+    if mode == "null":
+        valid = valid & ~bad
+    else:
+        v = v.copy()
+        v[low] = DATE_LO * per_day
+        v[high] = (DATE_HI + 1) * per_day - 1                     # last instant of 9999-12-31
+        v[gap] = v[gap] + (GAP_LAST + 1 - days[gap]) * per_day    # same time on 1582-10-15
+    fixes[name] = fixes.get(name, 0) + n
+    if pa.types.is_date32(arr.type):
+        return pc.cast(pa.array(v.astype(np.int32), pa.int32(), mask=~valid), pa.date32())
+    return pc.cast(pa.array(v, pa.int64(), mask=~valid), arr.type)
+
+
+def fixed_text(arr, spec, date_mode="error", fixes=None):
     """Timestamps / dates as fixed-width text, nulls as blanks."""
+    fixes = {} if fixes is None else fixes
     if spec["kind"] == "timestamp":
-        check_calendar_gap(arr, UNITS_PER_DAY[arr.type.unit], spec)
+        arr = fix_dates(arr, spec, UNITS_PER_DAY[arr.type.unit], date_mode, fixes)
         unit = arr.type.unit
         if arr.type.tz is not None:
             arr = pc.cast(arr, pa.timestamp(unit))       # same instant, as UTC wall time
@@ -894,7 +939,7 @@ def fixed_text(arr, spec):
     else:
         if pa.types.is_date64(arr.type):
             arr = pc.cast(arr, pa.date32())
-        check_calendar_gap(arr, 1, spec)
+        arr = fix_dates(arr, spec, 1, date_mode, fixes)
         s = pc.cast(arr, pa.string())
         width, what = DATE_WIDTH, "date"
     lens = pc.binary_length(s)
@@ -918,14 +963,14 @@ def column_array(batch, spec):
     return arr
 
 
-def prepare(batch, specs):
+def prepare(batch, specs, date_mode="error", fixes=None):
     """Convert every column once: fixed-width binary for dates/timestamps, text or
     binary arrays (nulls kept) for everything else. Aligned with specs."""
     prep = []
     for spec in specs:
         arr = column_array(batch, spec)
         if spec["kind"] in ("timestamp", "date"):
-            prep.append(fixed_text(arr, spec))
+            prep.append(fixed_text(arr, spec, date_mode, fixes))
         else:
             prep.append(to_text(arr, spec))
     return prep
@@ -1018,6 +1063,8 @@ def stream_part(part, out, stage_out=None):
     stage = part.get("stage")
     stage_problems = {"columns": {}, "record": None}
     large = 0
+    date_mode = part.get("out_of_range_dates") or "error"
+    fixes = part["_date_fixes"] = {}
     specs = part["columns"]
     top = []
     for s in specs:
@@ -1047,7 +1094,7 @@ def stream_part(part, out, stage_out=None):
                                                    columns=top, use_threads=threads != 1):
                 if batch.num_rows == 0:
                     continue
-                prep = prepare(batch, specs)
+                prep = prepare(batch, specs, date_mode, fixes)
                 if stage:
                     mask = large_mask(prep, specs)
                     n_large = (pc.sum(mask).as_py() or 0) if mask is not None else 0
@@ -1122,8 +1169,12 @@ def run_stream(path):
             os.rename(stage_tmp, stage["file"])
             stage_fh = stage_tmp = None
         secs = time.time() - t0
+        extra = {"large_rows": large} if stage else {}
+        if part.get("_date_fixes"):
+            extra["dates_" + ("nulled" if part.get("out_of_range_dates") == "null" else "clamped")] = \
+                part["_date_fixes"]
         log_line(part, event="end", status="ok", rows=rows, bytes=nbytes, seconds=round(secs, 3),
-                 mb_per_s=round(nbytes / MIB / max(secs, 1e-6), 1), **({"large_rows": large} if stage else {}))
+                 mb_per_s=round(nbytes / MIB / max(secs, 1e-6), 1), **extra)
         return 0
     except BrokenPipeError:
         # Oracle stopped reading (e.g. ROWNUM limit) - not an error; the large
@@ -1762,6 +1813,125 @@ def grow_readsize(st, specs, lob_hints, record_seen):
 # generate / resize
 # ---------------------------------------------------------------------------
 
+PARQUET_UNIT_PER_DAY = {"milliseconds": 86400 * 10 ** 3, "microseconds": 86400 * 10 ** 6,
+                        "nanoseconds": 86400 * 10 ** 9}
+
+
+def parquet_per_day(col):
+    """Units per day of a Parquet date/timestamp column's raw statistics, or
+    None when its statistics can't be used (INT96, unknown)."""
+    if col.physical_type == "INT96":
+        return None
+    lt = col.logical_type
+    info = json.loads(lt.to_json()) if lt is not None else {}
+    if info.get("Type") == "Date":
+        return 1
+    if info.get("Type") == "Timestamp":
+        return PARQUET_UNIT_PER_DAY.get(info.get("timeUnit"))
+    conv = str(col.converted_type or "")
+    return {"DATE": 1, "TIMESTAMP_MILLIS": 86400 * 10 ** 3,
+            "TIMESTAMP_MICROS": 86400 * 10 ** 6}.get(conv)
+
+
+def day_text(day):
+    return pc.cast(pa.array([int(day)], pa.int32()).cast(pa.date32()), pa.string())[0].as_py()
+
+
+def _scan_dates(path, rg_index, dspecs):
+    """Read one row group's date/timestamp columns and count what Oracle can't store."""
+    top = sorted({s["source"][0] for s in dspecs})
+    table = pq.ParquetFile(path).read_row_group(rg_index, columns=top)
+    out = {}
+    for spec in dspecs:
+        arr = column_array(table, spec)
+        per_day = 1 if spec["kind"] == "date" else UNITS_PER_DAY[arr.type.unit]
+        if pa.types.is_date64(arr.type):
+            arr = pc.cast(arr, pa.date32())
+        v, valid = date_ints(arr)
+        days, low, high, gap = date_problems(v, valid, per_day)
+        out[spec["name"]] = {
+            "low": int(low.sum()), "high": int(high.sum()), "gap": int(gap.sum()),
+            "min": int(days[valid].min()) if valid.any() else None,
+            "max": int(days[valid].max()) if valid.any() else None,
+            "examples": date_examples(days, low | high | gap)}
+    return out
+
+
+def date_check(files, specs, workers):
+    """Check every row group of every date/timestamp column against Oracle's
+    range (0001-01-01..9999-12-31, minus the 1582 gap). Uses the Parquet
+    min/max statistics; reads values only for row groups that are flagged or
+    have no usable statistics. Returns {column: result dict}."""
+    dspecs = [s for s in specs if s["kind"] in ("date", "timestamp")]
+    res = {s["name"]: {"row_groups": 0, "from_stats": 0, "read": 0, "low": 0, "high": 0, "gap": 0,
+                       "bad_row_groups": 0, "min": None, "max": None, "examples": []} for s in dspecs}
+    if not dspecs:
+        return res
+    tasks = {}
+    for f in files:
+        md = pq.read_metadata(f.path)
+        index = {md.schema.column(j).path: j for j in range(len(md.schema))}
+        for i in range(md.num_row_groups):
+            rg = md.row_group(i)
+            for spec in dspecs:
+                j = index.get(".".join(spec["source"]))
+                if j is None:
+                    continue
+                r = res[spec["name"]]
+                r["row_groups"] += 1
+                cc = rg.column(j)
+                st = cc.statistics if cc.is_stats_set else None
+                per_day = parquet_per_day(md.schema.column(j))
+                if st is not None and st.null_count == rg.num_rows:
+                    r["from_stats"] += 1                  # all NULL
+                    continue
+                if st is not None and st.has_min_max and per_day:
+                    lo, hi = int(st.min_raw) // per_day, int(st.max_raw) // per_day
+                    r["min"] = lo if r["min"] is None else min(r["min"], lo)
+                    r["max"] = hi if r["max"] is None else max(r["max"], hi)
+                    if lo >= DATE_LO and hi <= DATE_HI and not (lo <= GAP_LAST and hi >= GAP_FIRST):
+                        r["from_stats"] += 1
+                        continue
+                tasks.setdefault((f.path, i), []).append(spec)
+    if tasks:
+        sys.stderr.write("Date check: reading {} row group(s) without usable statistics or with "
+                         "suspicious ranges\n".format(len(tasks)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(workers, len(tasks)))) as pool:
+            futs = {pool.submit(_scan_dates, path, i, ds): ds for (path, i), ds in tasks.items()}
+            for fut in concurrent.futures.as_completed(futs):
+                for name, c in fut.result().items():
+                    r = res[name]
+                    r["read"] += 1
+                    for k in ("low", "high", "gap"):
+                        r[k] += c[k]
+                    if c["low"] or c["high"] or c["gap"]:
+                        r["bad_row_groups"] += 1
+                        r["examples"] = (r["examples"] + c["examples"])[:3]
+                    for k, f in (("min", min), ("max", max)):
+                        if c[k] is not None:
+                            r[k] = c[k] if r[k] is None else f(r[k], c[k])
+    return res
+
+
+def date_note(r):
+    if not r["row_groups"]:
+        return ""
+    rng = "{} .. {}".format(day_text(r["min"]), day_text(r["max"])) if r["min"] is not None else "all NULL"
+    note = "; dates {}".format(rng)
+    bad = r["low"] + r["high"] + r["gap"]
+    if bad:
+        note += "; NOT STORABLE: {:,} ({:,} before 0001, {:,} after 9999, {:,} in 1582 gap) in {} row group(s)".format(
+            bad, r["low"], r["high"], r["gap"], r["bad_row_groups"])
+    note += "; stats {}/{} row groups".format(r["from_stats"], r["row_groups"]) if r["read"] else ""
+    return note
+
+
+def append_note(spec, text):
+    """Add '; text'-style notes without a leading separator on an empty note."""
+    base = spec.get("note") or ""
+    spec["note"] = base + text if base else text.lstrip("; ")
+
+
 def stage_main_specs(specs, max_string_size, clob_table):
     """--stage-large-records: no LOB columns in the main table; CLOB/BLOB columns
     become VARCHAR2/RAW at the limit and larger values go to the _CLOB table."""
@@ -1773,7 +1943,7 @@ def stage_main_specs(specs, max_string_size, clob_table):
             s.update(kind="raw", max=raw_limit, otype="RAW({})".format(raw_limit))
         else:
             continue
-        s["note"] = (s.get("note") or "") + "; larger values -> " + clob_table
+        append_note(s, "; larger values -> " + clob_table)
 
 
 def stage_settings(st, specs, maxes, args):
@@ -1872,6 +2042,15 @@ def run_generate(args):
             column_avg[key] = column_avg.get(key, 0) + c["uncompressed"] / float(max(1, total_rows))
 
     specs = build_specs(schema, args, maxes, sampled, column_avg, bands)
+    dates = {}
+    if not args.no_date_check:
+        t0 = time.time()
+        dates = date_check(files, specs, args.multi_threaded_sampling)
+        for s in specs:
+            if s["name"] in dates:
+                s["date_check"] = dates[s["name"]]
+                append_note(s, date_note(dates[s["name"]]))
+        sys.stderr.write("Date check: {} column(s) in {:.1f}s\n".format(len(dates), time.time() - t0))
     if args.stage_large_records:
         if not log_dir or not log_obj:
             sys.exit("ERROR: --stage-large-records writes the large records into the log directory; "
@@ -1901,6 +2080,7 @@ def run_generate(args):
           "max_string_size": args.max_string_size, "max_readsize": args.max_readsize,
           "margin": args.margin, "readsize": readsize,
           "threads": args.threads, "pre_buffer": args.pre_buffer,
+          "out_of_range_dates": args.out_of_range_dates,
           "files": [f.path for f in files], "total_rows": total_rows}
     report = io.StringIO()
     print_inspect(files, columns, DEFAULT_DOPS, False, args.target_size, report)
@@ -1959,6 +2139,7 @@ def run_generate(args):
             "rows": rows,
             "readsize": readsize, "lob_max": lob_max,
             "threads": args.threads, "pre_buffer": args.pre_buffer,
+            "out_of_range_dates": args.out_of_range_dates,
             "log_file": log_file,
             "sources": sources,
             "columns": specs,
@@ -2002,6 +2183,14 @@ def run_generate(args):
         print("Log file : {}".format(log_file))
     for c in changes:
         print("Resized  : " + c)
+    bad_dates = [(n, r) for n, r in dates.items() if r["low"] + r["high"] + r["gap"]]
+    if dates and not bad_dates:
+        print("Dates    : {} column(s) checked in every row group: all storable in Oracle".format(len(dates)))
+    for n, r in bad_dates:
+        effect = {"error": "the load will FAIL", "null": "they will be loaded as NULL",
+                  "clamp": "they will be clamped"}[args.out_of_range_dates]
+        print("Dates    : {}: {:,} value(s) Oracle can't store (e.g. {}); --out-of-range-dates {}: {}".format(
+            n, r["low"] + r["high"] + r["gap"], ", ".join(r["examples"]), args.out_of_range_dates, effect))
     if st.get("stage"):
         print("Large    : records with a value above the main column sizes go to {} via {} "
               "(files {}_clob_*.dat in {}, READSIZE {:,})".format(
@@ -2185,6 +2374,13 @@ def main(argv=None):
                         help="upper limit for READSIZE (default 128MB); the largest record must fit")
         ap.add_argument("--readsize", type=parse_size, help="force READSIZE")
         ap.add_argument("--dop", type=int, default=8, help="PARALLEL degree in the DDL (default 8)")
+        ap.add_argument("--out-of-range-dates", choices=("error", "null", "clamp"), default="error",
+                        help="dates/timestamps Oracle can't store (before 0001-01-01, after 9999-12-31, "
+                             "or 1582-10-05..14): error (default) fails the load, null loads NULL, clamp "
+                             "moves them to 0001-01-01 / 9999-12-31 23:59:59.999999999 / 1582-10-15")
+        ap.add_argument("--no-date-check", action="store_true",
+                        help="skip the check of all date/timestamp values (Parquet statistics, plus "
+                             "reading row groups without statistics or with suspicious ranges)")
         ap.add_argument("--stage-large-records", action="store_true",
                         help="keep LOBs out of the main external table: records with any value larger "
                              "than its VARCHAR2/RAW column are written to files in the log directory "
