@@ -61,13 +61,14 @@
   <text x="830" y="314" class="s" text-anchor="middle">a few large files, many row groups</text>
   <text x="830" y="330" class="s" text-anchor="middle">on storage the database host can read</text>
 
-  <!-- Not every file passes through a job: a partner feed loads straight in. -->
-  <path class="ln" d="M500,198 L500,268"/>
-  <text x="512" y="222" class="lbl">or straight in, with no job at all</text>
-
   <!-- ===== Database host zone ===== -->
   <rect x="30" y="238" width="620" height="352" rx="12" class="zone"/>
   <text x="44" y="258" class="sec">DATABASE HOST · NOTHING LEAVES THE SERVER</text>
+
+  <!-- Not every file passes through a job: a partner feed loads straight in.
+       Drawn after the zone so the arrow is not hidden under its fill. -->
+  <path class="ln" d="M500,198 L500,268"/>
+  <text x="512" y="222" class="lbl">or straight in, with no job at all</text>
 
   <!-- pqora generate -->
   <rect x="415" y="274" width="215" height="126" rx="10" fill="#FFFBEB" stroke="#D97706" stroke-width="1.5"/>
