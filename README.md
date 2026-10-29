@@ -57,13 +57,18 @@ DuckDB, Hugging Face datasets, and the table formats built on top of it
 analytics pipeline, its intermediate and final results are very likely
 Parquet files.
 
-### The problem: the return trip into Oracle
+### The problem: getting Parquet into Oracle
 
 Oracle Database is where a large share of the world's operational data lives:
 the systems of record for finance, logistics, healthcare, government and
 telecom. Getting data **out** of Oracle into a data lake is a solved problem.
-Getting results **back into** Oracle, at scale and without altering them, is
-not.
+Getting Parquet **into** Oracle, at scale and without altering it, is not.
+
+Most of that Parquet never came from Oracle in the first place. It is a
+partner or vendor feed, another department's export, a purchased dataset, or
+the output of an analytics stack with no connection to the database. The
+round trip, your own data exported to a lake and written back after a job
+runs over it, is one case rather than the case.
 
 The core problem is **time that does not scale**. An AI pipeline hands you a
 50 GB Parquet file. The database server has 64 cores. The load still takes
@@ -86,14 +91,15 @@ hardware changes nothing. Around that sit the familiar problems:
 
 ### Where AI pipelines meet Oracle
 
-A typical enterprise AI pipeline looks like this: data is exported from
-Oracle into a lake, jobs produce features, predictions, embeddings and
-extracted text, and the results are written back as Parquet.
+A typical enterprise AI pipeline produces Parquet: jobs read whatever they
+are given and write out features, predictions, embeddings and extracted text.
+Some of the input is an export from your own Oracle, and much of it arrives
+from somewhere else entirely. Either way the output has to land in a table.
 
 ![pqora in the enterprise AI data pipeline](docs/images/solution_overview.svg)
 
-The return arrow is where many projects stall. Model outputs are only useful
-once they sit next to the data the business actually runs on, and that
+The arrow into Oracle is where many projects stall. Model outputs are only
+useful once they sit next to the data the business actually runs on, and that
 usually means a table in Oracle. pqora is built for exactly that step, and it
 handles the kinds of values AI pipelines produce:
 

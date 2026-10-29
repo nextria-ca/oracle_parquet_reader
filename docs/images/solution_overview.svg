@@ -18,24 +18,24 @@
   <rect width="1000" height="660" rx="16" fill="#FFFFFF"/>
 
   <text x="30" y="40" class="t">pqora in the enterprise AI data pipeline</text>
-  <text x="30" y="62" class="st">Data leaves Oracle easily; pqora is the fast, exact, parallel way for results to come back</text>
+  <text x="30" y="62" class="st">Parquet arrives from many places, most of it never from your own database; pqora is the fast, exact, parallel way to get it in</text>
 
   <!-- ===== Row 1: where the data goes ===== -->
   <!-- Oracle systems of record -->
-  <rect x="30" y="86" width="280" height="112" rx="10" fill="#FEF2F2" stroke="#B91C1C" stroke-width="1.5"/>
-  <text x="170" y="110" class="h" fill="#7F1D1D" text-anchor="middle">Oracle Database</text>
-  <text x="170" y="128" class="s" text-anchor="middle">systems of record</text>
-  <text x="170" y="150" class="s" text-anchor="middle">ERP · finance · operations · billing</text>
-  <text x="170" y="166" class="s" text-anchor="middle">clinical · case files · customer history</text>
-  <text x="170" y="182" class="s" text-anchor="middle">where applications and reports run</text>
+  <rect x="30" y="86" width="280" height="112" rx="10" fill="#F8FAFC" stroke="#94A3B8" stroke-width="1.5"/>
+  <text x="170" y="110" class="h" fill="#334155" text-anchor="middle">Where the Parquet comes from</text>
+  <text x="170" y="128" class="s" text-anchor="middle">mostly outside your database</text>
+  <text x="170" y="150" class="s" text-anchor="middle">partner and vendor feeds</text>
+  <text x="170" y="166" class="s" text-anchor="middle">other systems and departments</text>
+  <text x="170" y="182" class="s" text-anchor="middle">exports from your own databases</text>
 
   <path class="ln" d="M310,142 L360,142"/>
-  <text x="335" y="134" class="lbl" text-anchor="middle">export</text>
+  <text x="335" y="134" class="lbl" text-anchor="middle">arrive as</text>
 
   <!-- Data lake -->
   <rect x="360" y="86" width="280" height="112" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
-  <text x="500" y="110" class="h" fill="#1E3A8A" text-anchor="middle">Data lake: Parquet files</text>
-  <text x="500" y="128" class="s" text-anchor="middle">plain files, Delta Lake, Iceberg, Hudi</text>
+  <text x="500" y="110" class="h" fill="#1E3A8A" text-anchor="middle">Parquet files</text>
+  <text x="500" y="128" class="s" text-anchor="middle">a lake, a share, Delta, Iceberg, Hudi</text>
   <text x="500" y="150" class="s" text-anchor="middle">columnar · compressed · self-describing</text>
   <text x="500" y="166" class="s" text-anchor="middle">schema and statistics in the footer</text>
   <text x="500" y="182" class="s" text-anchor="middle">split into independently readable row groups</text>
@@ -60,6 +60,10 @@
   <text x="830" y="298" class="s" text-anchor="middle">summaries · timestamps · raw payloads</text>
   <text x="830" y="314" class="s" text-anchor="middle">a few large files, many row groups</text>
   <text x="830" y="330" class="s" text-anchor="middle">on storage the database host can read</text>
+
+  <!-- Not every file passes through a job: a partner feed loads straight in. -->
+  <path class="ln" d="M500,198 L500,268"/>
+  <text x="512" y="222" class="lbl">or straight in, with no job at all</text>
 
   <!-- ===== Database host zone ===== -->
   <rect x="30" y="238" width="620" height="352" rx="12" class="zone"/>
