@@ -1,4 +1,7 @@
-# pqora: Parquet into Oracle, in parallel, exactly
+# pqora: parallel Parquet loader for Oracle Database
+
+**Load Parquet files from a data lake or AI pipeline into Oracle tables, in
+parallel, with every value exactly as it was written.**
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python 3.6+](https://img.shields.io/badge/python-3.6%2B-blue.svg)](#requirements)
