@@ -59,6 +59,8 @@ Start with `README.md`, then:
   platform (DESIGN_NOTES.md), so `verify` fails there. Use 20.0.0 or 22.0.0+.
 - Public repository: write docs and comments for an outside reader; no
   internal host names, client names or paths.
+- Commit messages: plain descriptive messages only. Do not add
+  `Co-Authored-By`, `Claude-Session` or any other AI attribution trailers.
 
 ## Glossary
 part = `.pqpart` JSON work unit · spec = column spec dict (DEVELOPER.md 4.1) ·
