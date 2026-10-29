@@ -23,17 +23,19 @@ That's the whole load.
 
 Parquet is the standard file format of data lakes, Spark, and every modern
 export tool. Oracle is where a lot of that data has to end up. Getting it there
-is harder than it looks:
+is harder than it looks, and the biggest problem is **time that does not
+scale**: a 50 GB Parquet file on a 64-core database server still loads on
+one core, because standard loaders, Oracle's own included, treat one file as
+one unit of work. More hardware does not make the load faster. The other
+problems are smaller but just as real:
 
 - **Converting to CSV first** costs a full extra copy of the data. It also
   brings the classic CSV problems: delimiters and newlines inside values,
   NULL vs empty string, floats rounded by text formatting, binary data that has
   to be hex-encoded.
-- **Single-threaded loaders** leave the database server mostly idle while one
-  process decodes gigabytes of compressed columns.
 - **Readers that treat a file as the unit of work** can't spread one large
   Parquet file over many CPUs. When a dataset is a handful of big files,
-  parallelism stops at the file count.
+  parallelism stops at the file count and the rest of the server idles.
 - **Silent surprises**: a date in year 0, a date in the 1582 calendar gap, a
   string one byte longer than its column. Some tools reject the row, some
   change the value, and you find out months later.
@@ -55,7 +57,10 @@ workers busy.
 ![Whole-file vs row-group parallelism](images/parallelism.svg)
 
 Parts are listed **largest first**, so the long ones start early and the run
-doesn't end with one straggler. The `inspect` report shows how evenly the
+doesn't end with one straggler. Measured in the test kit on a 2-million-row
+table: a scan at parallel degree 8 took 1.5 s against 8.4 s at degree 1, a
+5.6x speed-up from the same file on the same machine. The ceiling is the
+number of row groups, typically dozens to hundreds in a large file. The `inspect` report shows how evenly the
 parts balance at each parallel degree *before* you load anything.
 
 ### 2. Multi-threaded inside every worker

@@ -63,16 +63,20 @@ Oracle Database is where a large share of the world's operational data lives:
 the systems of record for finance, logistics, healthcare, government and
 telecom. Getting data **out** of Oracle into a data lake is a solved problem.
 Getting results **back into** Oracle, at scale and without altering them, is
-not:
+not.
+
+The core problem is **time that does not scale**. An AI pipeline hands you a
+50 GB Parquet file. The database server has 64 cores. The load still takes
+all night, because every standard loader, including Oracle's own, treats one
+file as one job for one CPU. The other 63 cores idle, and buying more
+hardware changes nothing. Around that sit the familiar problems:
 
 - **Converting to CSV first** costs a full extra copy of the data and brings
   back every CSV problem: delimiters and newlines inside values, NULL vs
   empty string, floats rounded by text formatting, binary data hex-encoded.
-- **Single-threaded loaders** leave a large database server mostly idle while
-  one process decodes gigabytes of compressed columns.
 - **Readers that treat one file as one unit of work** cannot spread a large
   file over many CPUs. A dataset that arrives as a handful of multi-gigabyte
-  files loads on a handful of cores.
+  files loads on a handful of cores, however large the server.
 - **Oracle's own Parquet reader** (`ORACLE_BIGDATA`) rejects some real-world
   files because of format and encoding differences, and it does not split a
   single file across parallel workers.
@@ -112,10 +116,12 @@ SQL and vector search right beside the operational data.
 Three properties matter more for AI workloads than for a routine data
 migration, and they drive pqora's design:
 
-1. **Scale within a file.** Batch inference and embedding jobs tend to emit a
-   few very large files. pqora parallelizes by row group, so one 50 GB file
-   with 64 row groups keeps 64 Oracle parallel servers busy, across every
-   node of a RAC cluster.
+1. **Load time that scales with the hardware you own.** Batch inference and
+   embedding jobs tend to emit a few very large files. pqora parallelizes by
+   row group, so one 50 GB file with 64 row groups keeps 64 Oracle parallel
+   servers busy, across every node of a RAC cluster. In the test kit, eight
+   parallel workers finished the same scan 5.6 times faster than one; large
+   files split into far more than eight pieces.
 2. **Exactness you can audit.** A model's outputs that are silently rounded,
    truncated or shifted on load poison every decision made from them and
    make audits impossible. pqora never stores a value differently from the
