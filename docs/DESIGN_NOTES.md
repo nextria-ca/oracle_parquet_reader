@@ -117,7 +117,7 @@ Python. The stream path is `prepare` (convert each column once) + `assemble`
 | Behaviour | Handling |
 |---|---|
 | pyarrow 21.0.0 **on Windows only**: `fill_null` / `coalesce` on integer arrays return wrong values near nulls (MSVC compiler bug, [apache/arrow#47862](https://github.com/apache/arrow/issues/47862), fixed in 22.0.0). On a Windows development machine this corrupts the length prefixes and `verify` fails with `invalid literal for int()` | Linux servers are unaffected. For development on Windows use pyarrow 20.0.0 or 22.0.0+ |
-| pyarrow 6.0.1 through 21.0.0 on Linux and pyarrow 20.0.0 on Windows pass the offline self-test; CI runs the oldest and the current versions | Keep CI green on both ends before changing the stream path |
+| pyarrow 6.0.1 and 26.0.0 on Linux (CI) and pyarrow 6.0.1 and 20.0.0 on Windows pass the offline self-test | Keep CI green on both ends before changing the stream path |
 
 ## Python observations
 

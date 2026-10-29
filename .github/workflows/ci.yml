@@ -10,8 +10,8 @@ jobs:
     name: pyflakes + vermin (Python 3.6 compatibility)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install pyflakes vermin
@@ -20,20 +20,22 @@ jobs:
 
   selftest:
     name: offline self-test (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: "oldest: Python 3.8, pyarrow 6.0.1, numpy 1.19.5"
+            os: ubuntu-22.04          # Python 3.8 is not provided on newer runner images
             python: "3.8"
             packages: "pyarrow==6.0.1 numpy==1.19.5"
           - name: "current: Python 3.12, latest pyarrow and numpy"
+            os: ubuntu-latest
             python: "3.12"
             packages: "pyarrow numpy"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
       - run: pip install ${{ matrix.packages }}
@@ -59,10 +61,11 @@ jobs:
           bytes="$(env -i /bin/sh /tmp/t/p/pqora.sh "$(ls /tmp/t/p/t_*.pqpart | head -1)" | wc -c)"
           echo "wrapper produced $bytes bytes"
           test "$bytes" -gt 0
-      - name: resize without rescanning
+      - name: resize without rescanning (widen a column to CLOB, then re-verify)
         run: |
-          python pqora.py resize /tmp/t/p/t_manifest.json --field-size S_SHORT=500 --dry-run
-          python pqora.py resize /tmp/t/p/t_manifest.json --field-size S_SHORT=500
+          python pqora.py resize /tmp/t/p/t_manifest.json --field-size S_SHORT=lob --dry-run
+          python pqora.py resize /tmp/t/p/t_manifest.json --field-size S_SHORT=lob
+          test -f /tmp/t/p/t_alter.sql
           python pqora.py verify /tmp/t/p/t_*.pqpart
 
   python36:
@@ -74,11 +77,22 @@ jobs:
     container:
       image: python:3.6-slim
     steps:
-      - name: clone
+      - name: fetch sources
+        # No apt (the image's Debian release is archived) and no git: download the
+        # commit's tarball with Python's own urllib and unpack it with tar.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL_URL: https://api.github.com/repos/${{ github.repository }}/tarball/${{ github.sha }}
         run: |
-          apt-get update -qq && apt-get install -y -qq git >/dev/null
-          git clone --quiet "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" /w
-          cd /w && git checkout --quiet "${{ github.sha }}"
+          python - <<'EOF'
+          import os, urllib.request
+          req = urllib.request.Request(os.environ["TARBALL_URL"],
+                                       headers={"Authorization": "token " + os.environ["GH_TOKEN"],
+                                                "User-Agent": "pqora-ci"})
+          with urllib.request.urlopen(req) as r, open("/tmp/src.tar.gz", "wb") as f:
+              f.write(r.read())
+          EOF
+          mkdir -p /w && tar xzf /tmp/src.tar.gz -C /w --strip-components=1 && ls /w
       - name: install
         run: pip install --quiet pyarrow==6.0.1 numpy==1.19.5
       - name: self-test
