@@ -337,8 +337,8 @@ HCC CTAS probe, cleanup. Output: `work/pqora_report_<host>_<time>.tar.gz`
 (`summary.txt` + every sqlplus output, logs, DDL; no password). Locally it
 reports 42 checks.
 
-Typical local run (database in a Docker container, `/opt/bigdata` mounted at
-the same path inside):
+Typical local run (database in a container, with the work directory mounted
+at the same path inside and outside):
 ```bash
 sh kit/make_kit.sh
 # unpack dist/pqora_kit_<v>.tar.gz somewhere readable by oracle, then as oracle:
@@ -356,12 +356,18 @@ DB_CONNECT='<user>/<password>@//localhost:1521/<service>' ./run_kit.sh
 
 ## 8. Release
 
-1. Change `VERSION` in `pqora.py` (appears in messages, logs, parts, manifest
-   and the kit file name).
+1. Move the *Unreleased* section of `CHANGELOG.md` under the new version with
+   the date, and change `VERSION` in `pqora.py` (appears in messages, logs,
+   parts, manifest and the kit file name). Versioning rules are at the top of
+   `CHANGELOG.md`.
 2. `sh kit/make_kit.sh` → `dist/pqora_kit_<VERSION>.tar.gz` (pqora.py,
-   pqora_selftest.py, run_kit.sh, README.txt).
-3. Run the kit locally; commit; ship the tarball (or just `pqora.py`) to the
-   server. After upgrading, rerun `generate` so parts carry the new options.
+   pqora_selftest.py, run_kit.sh, README.txt, LICENSE, NOTICE).
+3. Run the checks in `CONTRIBUTING.md` and the kit against a database; commit;
+   tag `v<VERSION>` and push the tag. The release workflow
+   (`.github/workflows/release.yml`) rebuilds the kit tarball and attaches it
+   to a GitHub Release.
+4. On a server, ship the tarball (or just `pqora.py`). After upgrading, rerun
+   `generate` so parts carry the new version and options.
 
 ## 9. How to extend
 

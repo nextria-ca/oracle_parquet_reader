@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 660" width="1000" height="660" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <style>
+      .t  { font-size: 22px; font-weight: 700; fill: #0F172A; }
+      .st { font-size: 13px; fill: #64748B; }
+      .sec { font-size: 12px; font-weight: 700; fill: #64748B; letter-spacing: 1.5px; }
+      .h  { font-size: 14px; font-weight: 700; }
+      .s  { font-size: 11.5px; fill: #475569; }
+      .lbl { font-size: 10.5px; fill: #475569; }
+      .m  { font-family: Consolas, 'DejaVu Sans Mono', monospace; font-size: 10.5px; fill: #0F172A; }
+      .ln { stroke: #475569; stroke-width: 1.6; fill: none; marker-end: url(#arr); }
+      .zone { stroke: #64748B; stroke-width: 1.4; stroke-dasharray: 6 5; fill: #F8FAFC; }
+    </style>
+  </defs>
+  <rect width="1000" height="660" rx="16" fill="#FFFFFF"/>
+
+  <text x="30" y="40" class="t">pqora in the enterprise AI data pipeline</text>
+  <text x="30" y="62" class="st">Data leaves Oracle easily; pqora is the fast, exact, parallel way for results to come back</text>
+
+  <!-- ===== Row 1: where the data goes ===== -->
+  <!-- Oracle systems of record -->
+  <rect x="30" y="86" width="280" height="112" rx="10" fill="#FEF2F2" stroke="#B91C1C" stroke-width="1.5"/>
+  <text x="170" y="110" class="h" fill="#7F1D1D" text-anchor="middle">Oracle Database</text>
+  <text x="170" y="128" class="s" text-anchor="middle">systems of record</text>
+  <text x="170" y="150" class="s" text-anchor="middle">ERP · finance · operations · billing</text>
+  <text x="170" y="166" class="s" text-anchor="middle">clinical · case files · customer history</text>
+  <text x="170" y="182" class="s" text-anchor="middle">where applications and reports run</text>
+
+  <path class="ln" d="M310,142 L360,142"/>
+  <text x="335" y="134" class="lbl" text-anchor="middle">export</text>
+
+  <!-- Data lake -->
+  <rect x="360" y="86" width="280" height="112" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="1.5"/>
+  <text x="500" y="110" class="h" fill="#1E3A8A" text-anchor="middle">Data lake: Parquet files</text>
+  <text x="500" y="128" class="s" text-anchor="middle">plain files, Delta Lake, Iceberg, Hudi</text>
+  <text x="500" y="150" class="s" text-anchor="middle">columnar · compressed · self-describing</text>
+  <text x="500" y="166" class="s" text-anchor="middle">schema and statistics in the footer</text>
+  <text x="500" y="182" class="s" text-anchor="middle">split into independently readable row groups</text>
+
+  <path class="ln" d="M640,142 L690,142"/>
+  <text x="665" y="134" class="lbl" text-anchor="middle">read</text>
+
+  <!-- AI jobs -->
+  <rect x="690" y="86" width="280" height="112" rx="10" fill="#F5F3FF" stroke="#7C3AED" stroke-width="1.5"/>
+  <text x="830" y="110" class="h" fill="#4C1D95" text-anchor="middle">AI and analytics jobs</text>
+  <text x="830" y="128" class="s" text-anchor="middle">Spark · Python · GPUs</text>
+  <text x="830" y="150" class="s" text-anchor="middle">feature engineering · model training</text>
+  <text x="830" y="166" class="s" text-anchor="middle">batch inference · embeddings</text>
+  <text x="830" y="182" class="s" text-anchor="middle">LLM extraction and summarization</text>
+
+  <path class="ln" d="M830,198 L830,238"/>
+
+  <!-- Results -->
+  <rect x="690" y="238" width="280" height="104" rx="10" fill="#F5F3FF" stroke="#7C3AED" stroke-width="1.5"/>
+  <text x="830" y="262" class="h" fill="#4C1D95" text-anchor="middle">Results, as Parquet</text>
+  <text x="830" y="282" class="s" text-anchor="middle">scores · labels · entities · embeddings</text>
+  <text x="830" y="298" class="s" text-anchor="middle">summaries · timestamps · raw payloads</text>
+  <text x="830" y="314" class="s" text-anchor="middle">a few large files, many row groups</text>
+  <text x="830" y="330" class="s" text-anchor="middle">on storage the database host can read</text>
+
+  <!-- ===== Database host zone ===== -->
+  <rect x="30" y="238" width="620" height="352" rx="12" class="zone"/>
+  <text x="44" y="258" class="sec">DATABASE HOST · NOTHING LEAVES THE SERVER</text>
+
+  <!-- pqora generate -->
+  <rect x="415" y="274" width="215" height="126" rx="10" fill="#FFFBEB" stroke="#D97706" stroke-width="1.5"/>
+  <text x="522" y="298" class="h" fill="#78350F" text-anchor="middle">pqora.py generate</text>
+  <text x="522" y="318" class="s" text-anchor="middle">reads footers and statistics</text>
+  <text x="522" y="334" class="s" text-anchor="middle">sizes columns from the data</text>
+  <text x="522" y="350" class="s" text-anchor="middle">checks every date and timestamp</text>
+  <text x="522" y="366" class="s" text-anchor="middle">writes one .pqpart per row group</text>
+  <text x="522" y="382" class="s" text-anchor="middle">writes &lt;table&gt;.sql and the manifest</text>
+
+  <path class="ln" d="M690,300 L630,300"/>
+  <text x="660" y="291" class="lbl" text-anchor="middle">metadata</text>
+
+  <path class="ln" d="M415,316 L355,316"/>
+  <text x="385" y="307" class="lbl" text-anchor="middle">parts, SQL</text>
+
+  <!-- Oracle load side -->
+  <rect x="60" y="274" width="295" height="296" rx="10" fill="#FEF2F2" stroke="#B91C1C" stroke-width="1.5"/>
+  <text x="207" y="298" class="h" fill="#7F1D1D" text-anchor="middle">Oracle Database</text>
+  <text x="207" y="316" class="s" text-anchor="middle">EXT_&lt;table&gt;: ORACLE_LOADER + preprocessor</text>
+
+  <rect x="70" y="330" width="275" height="22" rx="4" fill="#FFFFFF" stroke="#FCA5A5"/>
+  <text x="78" y="345" class="m">PX server 1 → pqora.py → row group 1</text>
+  <rect x="70" y="358" width="275" height="22" rx="4" fill="#FFFFFF" stroke="#FCA5A5"/>
+  <text x="78" y="373" class="m">PX server 2 → pqora.py → row group 2</text>
+  <rect x="70" y="386" width="275" height="22" rx="4" fill="#FFFFFF" stroke="#FCA5A5"/>
+  <text x="78" y="401" class="m">PX server 3 → pqora.py → row group 3</text>
+  <rect x="70" y="414" width="275" height="22" rx="4" fill="#FFFFFF" stroke="#FCA5A5"/>
+  <text x="78" y="429" class="m">PX server n → pqora.py → row group n</text>
+  <text x="207" y="452" class="s" text-anchor="middle">pyarrow decodes in C++ threads</text>
+
+  <rect x="70" y="462" width="275" height="24" rx="4" fill="#FFFFFF" stroke="#FCA5A5"/>
+  <text x="78" y="478" class="m">INSERT /*+ APPEND PARALLEL */ INTO &lt;table&gt;</text>
+  <text x="207" y="506" class="s" text-anchor="middle">direct-path, parallel, across every RAC node</text>
+  <text x="207" y="522" class="s" text-anchor="middle">row counts and manifest checked in the same script</text>
+  <text x="207" y="538" class="s" text-anchor="middle">every value bit-exact; unstorable dates stop the load</text>
+  <text x="207" y="554" class="s" text-anchor="middle">resize without rescanning; rejects reloaded</text>
+
+  <!-- data path: results -> PX servers -->
+  <path class="ln" d="M760,342 L760,425 L355,425"/>
+  <text x="560" y="441" class="lbl" text-anchor="middle">each PX server reads only its own row groups</text>
+
+  <!-- consumers -->
+  <path class="ln" d="M207,570 L207,600"/>
+  <rect x="30" y="600" width="620" height="44" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="1.5"/>
+  <text x="340" y="627" class="h" fill="#065F46" text-anchor="middle" font-size="12.5">Applications · reports · SQL analytics · AI Vector Search (TO_VECTOR) · RAG and agents</text>
+
+  <!-- note -->
+  <rect x="690" y="600" width="280" height="44" rx="10" fill="#F8FAFC" stroke="#CBD5E1" stroke-width="1.2"/>
+  <text x="830" y="619" class="s" text-anchor="middle">pqora is one-directional: Parquet into Oracle.</text>
+  <text x="830" y="635" class="s" text-anchor="middle">Oracle to Parquet is already well served.</text>
+</svg>

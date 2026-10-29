@@ -1,0 +1,32 @@
+name: Release
+
+# Pushing a tag v<version> (matching VERSION in pqora.py) builds the kit tarball
+# and publishes a GitHub Release with it attached.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag must match VERSION in pqora.py
+        run: |
+          ver="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' pqora.py)"
+          echo "VERSION=$ver tag=$GITHUB_REF_NAME"
+          test "v$ver" = "$GITHUB_REF_NAME"
+      - name: build kit
+        run: sh kit/make_kit.sh && ls -l dist/
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/pqora_kit_*.tar.gz \
+            --title "pqora $GITHUB_REF_NAME" \
+            --generate-notes \
+            --notes "See CHANGELOG.md for details. The attached pqora_kit tarball contains pqora.py, pqora_selftest.py, the test kit runner, LICENSE and NOTICE."

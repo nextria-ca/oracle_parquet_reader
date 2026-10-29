@@ -77,4 +77,7 @@ What it tests
   - whether COMPRESS FOR QUERY HIGH works on this storage (INFO only)
   - the manifest and sampling-cache queries at the end of every <table>.sql
 
-Locally (Oracle 23ai) the kit reports 42 passed checks.
+On Oracle 23ai/26ai the kit reports 42 passed checks.
+
+pqora is open source under the Apache License 2.0 (see LICENSE and NOTICE).
+Source, documentation and issues: https://github.com/nextria-ca/oracle_parquet_reader

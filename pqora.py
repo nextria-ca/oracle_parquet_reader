@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Nextria
+# SPDX-License-Identifier: Apache-2.0
 """
 pqora.py - load Parquet files into Oracle in parallel through ORACLE_LOADER
 external tables with a preprocessor.

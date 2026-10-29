@@ -41,8 +41,8 @@ servers; each runs its own pqora process. With 64 parts and `PARALLEL 16`,
 
 ### Software on the database server
 - Python 3.6 or newer, pyarrow 6.0.1 or newer, numpy (and `dataclasses`
-  backport on 3.6 is *not* needed). Example: Oracle Linux 7 / ODA with
-  Python 3.6.8, pyarrow 6.0.1, numpy 1.19.5.
+  backport on 3.6 is *not* needed). Example: Oracle Linux 7 on an Oracle
+  Database Appliance with Python 3.6.8, pyarrow 6.0.1, numpy 1.19.5.
 - sqlplus (for running the generated SQL and the kit).
 - The Python packages must be readable by the database OS user (`oracle`),
   e.g. a system install or a venv in a world-readable directory. A package
@@ -121,7 +121,7 @@ pqora.py PATHS... [--target-size SIZE] [--dop-list 2,4,8,16,32,64] [--list-rowgr
 ```
 PATHS: files, globs or directories (`*.parquet`, natural sort order).
 Reports: file count, rows, row groups, file size (byte length, not allocated
-space - storage like Isilon reports more), compressed/uncompressed size,
+space - some storage, e.g. Dell Isilon, reports more), compressed/uncompressed size,
 format versions, codecs, writer; per column: physical type, logical type,
 codec, sizes, ratio, dictionary pages, statistics, encodings; row group size
 statistics and distribution; load balance per DOP for the parts `generate`

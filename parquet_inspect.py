@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Nextria
+# SPDX-License-Identifier: Apache-2.0
 """
 parquet_inspect.py - assess Parquet files for parallel loading into Oracle and
 generate ORACLE_BIGDATA external table DDL.

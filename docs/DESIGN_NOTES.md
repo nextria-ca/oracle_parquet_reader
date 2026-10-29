@@ -2,13 +2,14 @@
 
 Why pqora is built the way it is, and the Oracle / pyarrow behaviours it relies
 on. Most points were verified by experiment on Oracle AI Database 26ai
-(23.26, local test system) with pyarrow 6.0.1; the test kit re-verifies them on
-the target 19c system (Oracle Database Appliance).
+(23.26) with pyarrow 6.0.1; the test kit re-verifies them on Oracle 19c
+(Oracle Database Appliance, Oracle Linux 7). If you run the kit on another
+platform, please attach the report to an issue (see CONTRIBUTING.md).
 
 ## Decisions
 
 ### Preprocessor instead of ORACLE_BIGDATA
-- Oracle's native Parquet reader (`ORACLE_BIGDATA`) rejected some production
+- Oracle's native Parquet reader (`ORACLE_BIGDATA`) rejected some real-world
   files; rewriting them as Parquet format 1.0 helped only partly.
 - It did not parallelize within a single Parquet file (one file = one parallel
   unit), which caps throughput for few large files.
@@ -49,7 +50,7 @@ otherwise (`--out-of-range-dates`, `--column-type`, `--stage-large-records`,
 
 ### Staged large records
 Any LOB column in the external table makes the whole load much slower
-(observed on the target system). `--stage-large-records` removes LOBs from
+(observed on a 19c Oracle Database Appliance). `--stage-large-records` removes LOBs from
 the bulk path and writes rare large records to side files read by a second
 external table. Side files are written per part to a temp name and renamed on
 success, because every read of the external table re-runs the preprocessor
@@ -111,6 +112,13 @@ Python. The stream path is `prepare` (convert each column once) + `assemble`
 | Parquet format 1.0 can't store nanosecond timestamps | Test data written as format 2.6 where needed |
 | Statistics: `min_raw`/`max_raw` give physical values; `.min/.max` convert to Python (overflow risk) | Date check uses raw values + unit from the logical type JSON |
 
+## Newer pyarrow versions
+
+| Behaviour | Handling |
+|---|---|
+| pyarrow 21.0.0 **on Windows only**: `fill_null` / `coalesce` on integer arrays return wrong values near nulls (MSVC compiler bug, [apache/arrow#47862](https://github.com/apache/arrow/issues/47862), fixed in 22.0.0). On a Windows development machine this corrupts the length prefixes and `verify` fails with `invalid literal for int()` | Linux servers are unaffected. For development on Windows use pyarrow 20.0.0 or 22.0.0+ |
+| pyarrow 6.0.1 through 21.0.0 on Linux and pyarrow 20.0.0 on Windows pass the offline self-test; CI runs the oldest and the current versions | Keep CI green on both ends before changing the stream path |
+
 ## Python observations
 
 | Behaviour | Handling |
@@ -124,21 +132,27 @@ Python. The stream path is `prepare` (convert each column once) + `assemble`
 - Local, 2M CSV-like rows, DOP 1/4/8: 12.1 s / 3.2 s / 1.8 s scan (before
   `--threads`/`--pre-buffer`), 8.4 s / 2.4 s / 1.5 s after.
 - One CLOB column with 0.1% large values: bulk INSERT 1.20 s with the CLOB vs
-  0.70 s staged (+0.65 s for the large rows) - local; the target system showed
-  a much larger penalty.
+  0.70 s staged (+0.65 s for the large rows) - local; a 19c Oracle Database Appliance
+  showed a much larger penalty.
 - Date validation cost if values must be read: ~8 ns decode + ~11 ns check
   per value per core; with statistics usually zero reads.
-- On NFS (Isilon) storage, waits show up as threads in D state and a high
+- On NFS storage (Dell Isilon in testing), waits show up as threads in D state and a high
   load average; large coalesced reads (`--pre-buffer`) and fewer threads per
   process help.
 
-## Open questions / to be confirmed on 19c (kit report)
+## Open points
 
-- `TO_BLOB(BFILENAME())` in the manifest verification queries.
+Verified on 23ai/26ai and covered by kit tests, but not yet confirmed on every
+platform. Kit reports from other systems are welcome.
+
+- `TO_BLOB(BFILENAME())` in the manifest verification queries on 19c.
 - READSIZE 128 MB with a 100 MB BLOB on 19c.
-- HCC availability on the ODA storage.
-- Behaviour of `--stage-large-records` and the date modes on 19c (kit tests
-  exist).
+- Hybrid Columnar Compression depends on the storage; the kit probes the
+  staging CTAS and reports INFO either way.
+- `--stage-large-records` and the `--out-of-range-dates` modes on 19c (kit
+  tests exist).
+- Oracle versions other than 19c and 23ai/26ai, and non-Linux platforms, are
+  untested.
 
 ## Ideas not implemented
 

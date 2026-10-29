@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    name: pyflakes + vermin (Python 3.6 compatibility)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyflakes vermin
+      - run: pyflakes pqora.py pqora_selftest.py
+      - run: vermin -t=3.6- --no-tips --violations pqora.py pqora_selftest.py
+
+  selftest:
+    name: offline self-test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "oldest: Python 3.8, pyarrow 6.0.1, numpy 1.19.5"
+            python: "3.8"
+            packages: "pyarrow==6.0.1 numpy==1.19.5"
+          - name: "current: Python 3.12, latest pyarrow and numpy"
+            python: "3.12"
+            packages: "pyarrow numpy"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install ${{ matrix.packages }}
+      - name: versions
+        run: python -c "import sys, pyarrow, numpy; print(sys.version.split()[0], 'pyarrow', pyarrow.__version__, 'numpy', numpy.__version__)"
+      - name: test data
+        run: python pqora_selftest.py make /tmp/t --big-rows 100000 --blob-mb 1,5
+      - name: inspect
+        run: python pqora.py /tmp/t/types.parquet
+      - name: generate
+        run: |
+          python pqora.py generate /tmp/t/types.parquet --table T --out-dir /tmp/t/p --sample-size all --dop 4
+          python pqora.py generate /tmp/t/types.parquet --table TS --out-dir /tmp/t/p --sample-size all --dop 4 --stage-large-records
+          python pqora.py generate /tmp/t/gap.parquet --table GAPNULL --out-dir /tmp/t/p --dop 2 --out-of-range-dates null
+          python pqora.py generate /tmp/t/gap.parquet --table GAPCLAMP --out-dir /tmp/t/p --dop 2 --out-of-range-dates clamp
+          python pqora.py generate /tmp/t/interval.parquet --table INTERVAL --out-dir /tmp/t/p --dop 2
+          python pqora.py generate /tmp/t/big.parquet --table BIG --out-dir /tmp/t/p --sample-size all --dop 4
+          python pqora.py generate /tmp/t/blobs.parquet --table BLOBS --out-dir /tmp/t/p --sample-size all --dop 2
+      - name: verify framing of every record
+        run: python pqora.py verify /tmp/t/p/t_*.pqpart /tmp/t/p/ts_*.pqpart /tmp/t/p/gapnull_*.pqpart /tmp/t/p/gapclamp_*.pqpart /tmp/t/p/interval_*.pqpart /tmp/t/p/big_*.pqpart /tmp/t/p/blobs_*.pqpart
+      - name: wrapper with an empty environment (as Oracle runs it)
+        run: |
+          bytes="$(env -i /bin/sh /tmp/t/p/pqora.sh "$(ls /tmp/t/p/t_*.pqpart | head -1)" | wc -c)"
+          echo "wrapper produced $bytes bytes"
+          test "$bytes" -gt 0
+      - name: resize without rescanning
+        run: |
+          python pqora.py resize /tmp/t/p/t_manifest.json --field-size S_SHORT=500 --dry-run
+          python pqora.py resize /tmp/t/p/t_manifest.json --field-size S_SHORT=500
+          python pqora.py verify /tmp/t/p/t_*.pqpart
+
+  python36:
+    # Real Python 3.6 with the oldest supported libraries, as found on Oracle Linux 7.
+    # The repository is cloned with git instead of actions/checkout, because the
+    # JavaScript actions do not run in this old image.
+    name: offline self-test (Python 3.6, pyarrow 6.0.1)
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.6-slim
+    steps:
+      - name: clone
+        run: |
+          apt-get update -qq && apt-get install -y -qq git >/dev/null
+          git clone --quiet "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" /w
+          cd /w && git checkout --quiet "${{ github.sha }}"
+      - name: install
+        run: pip install --quiet pyarrow==6.0.1 numpy==1.19.5
+      - name: self-test
+        run: |
+          cd /w
+          python pqora_selftest.py make /tmp/t --big-rows 50000 --blob-mb 1
+          python pqora.py /tmp/t/types.parquet
+          python pqora.py generate /tmp/t/types.parquet --table T --out-dir /tmp/t/p --sample-size all --dop 4
+          python pqora.py generate /tmp/t/types.parquet --table TS --out-dir /tmp/t/p --sample-size all --dop 4 --stage-large-records
+          python pqora.py verify /tmp/t/p/t_*.pqpart /tmp/t/p/ts_*.pqpart
+          bytes="$(env -i /bin/sh /tmp/t/p/pqora.sh "$(ls /tmp/t/p/t_*.pqpart | head -1)" | wc -c)"
+          echo "wrapper produced $bytes bytes"
+          test "$bytes" -gt 0

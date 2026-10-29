@@ -1,4 +1,6 @@
 #!/bin/bash
+# Copyright 2026 Nextria
+# SPDX-License-Identifier: Apache-2.0
 # pqora test kit - runs every experiment unattended and packs one report.
 #
 #   DB_CONNECT='user/password@//host:1521/service' ./run_kit.sh

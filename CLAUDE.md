@@ -4,10 +4,12 @@
 `pqora.py` loads Parquet into Oracle through an `ORACLE_LOADER` external table
 whose preprocessor is `pqora.py` itself; one Parquet row group (or group of
 them) = one `.pqpart` location file = one Oracle parallel work unit.
+It is an open-source project of Nextria (Apache License 2.0).
 Start with `README.md`, then:
 - `docs/USER_GUIDE.md` - behaviour, options, generated files, troubleshooting
 - `docs/DEVELOPER.md` - architecture, code map, data structures, stream format, testing, release
 - `docs/DESIGN_NOTES.md` - decisions and verified Oracle/pyarrow behaviours (read before "fixing" something that looks odd)
+- `CONTRIBUTING.md` - the checks every change must pass, release steps
 
 ## Non-negotiable constraints
 - Must run on **Python 3.6 + pyarrow 6.0.1 + numpy 1.19** (Oracle Database
@@ -28,22 +30,35 @@ Start with `README.md`, then:
 | `pqora.py` | the tool: inspect (default), `generate`, stream (`<part>.pqpart`), `verify`, `resize` |
 | `pqora_selftest.py` | test data (`make`), pyarrow vs Oracle checksums (`expected`, `sql`, `compare`, `stageview`, `parallel`) |
 | `kit/run_kit.sh` | unattended test kit for a DB server (all experiments → one report tarball) |
-| `kit/make_kit.sh` | builds `dist/pqora_kit_<VERSION>.tar.gz` |
+| `kit/make_kit.sh` | builds `dist/pqora_kit_<VERSION>.tar.gz` (includes LICENSE and NOTICE) |
 | `kit/README.txt` | kit instructions (shipped in the tarball) |
 | `parquet_inspect.py` | old prototype for the native ORACLE_BIGDATA driver; not maintained |
+| `docs/images/*.svg` | hand-written diagrams used by README.md and docs/WHY_PQORA.md |
+| `.github/workflows/ci.yml` | pyflakes, vermin, offline self-test on pyarrow 6.0.1 / current / real Python 3.6 |
+| `.github/workflows/release.yml` | on tag `v<VERSION>`: builds the kit and publishes a GitHub Release |
+| `LICENSE`, `NOTICE`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md` | open-source project files |
 
 ## Working on the code
-- Version: `VERSION` in `pqora.py`; bump it when shipping a new kit.
-- After changes: `pyflakes`, `vermin`, offline `generate` + `verify`, and the
-  full kit against a database (DEVELOPER.md section 7). The kit currently
-  reports 42 checks; all must pass.
+- Version: `VERSION` in `pqora.py`; maintainers bump it at release time together
+  with `CHANGELOG.md` (steps in DEVELOPER.md section 8).
+- After changes: `pyflakes`, `vermin`, offline `generate` + `verify` on both the
+  oldest (pyarrow 6.0.1) and a current pyarrow, and the full kit against a
+  database (DEVELOPER.md section 7). The kit currently reports 42 checks; all
+  must pass.
+- Every source file starts with the SPDX header
+  (`# Copyright 2026 Nextria` / `# SPDX-License-Identifier: Apache-2.0`).
+- Record user-visible changes in `CHANGELOG.md` under *Unreleased*.
 - Keep docs in sync: options table in USER_GUIDE.md section 4.2, column spec
   keys and file formats in DEVELOPER.md section 4, verified behaviours in
   DESIGN_NOTES.md.
 - Generated SQL must stay runnable by SQL*Plus as a whole file (no blank lines
   inside statements, `--` comments only).
-- Do not commit credentials; test connection details come from the local
-  environment, not from this repo.
+- Do not commit credentials, Parquet files, generated parts or kit reports;
+  test connection details come from the local environment, not from this repo.
+- Developing on Windows: pyarrow 21.0.0 has a broken `fill_null` on that
+  platform (DESIGN_NOTES.md), so `verify` fails there. Use 20.0.0 or 22.0.0+.
+- Public repository: write docs and comments for an outside reader; no
+  internal host names, client names or paths.
 
 ## Glossary
 part = `.pqpart` JSON work unit · spec = column spec dict (DEVELOPER.md 4.1) ·
